@@ -1,136 +1,121 @@
-"""Cena do Go: goban voxel, pedras, contagem automática, modos Jogo e Livre."""
+"""Mesa de Go em pixel art: modos Jogo e Livre, contagem automática."""
 from __future__ import annotations
 
 import math
 
-import numpy as np
 import pygame
 
 from . import go_rules as gr
-from .renderer import InstanceBatch
-from .scene_common import TABLE_TOP, add_label, as_static, build_room
-from .voxels import go_bowl, go_stone
+from .fx import ease_out_back
+from .pixelart import OUTLINE, draw_tiny, stone_sprite, tiny_width
+from .scene_base import SceneBase
 
-BOARD_WOOD = (0.86, 0.64, 0.36)
-LINE = (0.16, 0.10, 0.06)
-TERR = {gr.BLACK: (0.10, 0.10, 0.14), gr.WHITE: (0.97, 0.97, 0.95)}
+CELL = {9: 18, 13: 12, 19: 8}
+MARGIN = {9: 14, 13: 12, 19: 11}
 SIZES = (9, 13, 19)
 KOMIS = (0.5, 5.5, 6.5, 7.5)
-DROP_TIME = 0.25
-SPAN = 9.0
+WOOD = (222, 168, 96)
+WOOD_DARK = (196, 140, 76)
+LINE = (70, 40, 26)
+DROP_TIME = 0.28
+NAME = gr.COLOR_NAME
 
 
-class GoScene:
+class GoScene(SceneBase):
     name = "Go"
-    focus_radius = 6.5
+    theme = ((0.12, 0.62, 0.52), (0.93, 0.66, 0.18), (0.07, 0.11, 0.13))
 
     def __init__(self, size=19):
+        super().__init__()
         self.game = gr.GoGame(size)
-        self.mode = "jogo"
         self.free_color = gr.BLACK
-        self.hover = None
-        self.time = 0.0
-        self.drop = None              # (x, y, t0) animação da última pedra
+        self.flipped = False
+        self.drop = None
         self.show_terr = False
         self.tally = {gr.BLACK: 0, gr.WHITE: 0}
         self.counted = None
-        self.message = ("", 0.0)
-        self._est_key = None
-        self._est = None
+        self._est_key = self._est = None
         self._legal_key = None
         self._legal = False
-        self._setup_geometry()
+        self._setup()
 
     # ------------------------------------------------------------ geometria
-    def _setup_geometry(self):
+    def _setup(self):
         n = self.game.size
-        self.s = SPAN / (n - 1)
-        self.vox = self.s * 0.092
-        self.stone = {gr.BLACK: go_stone("b", self.vox), gr.WHITE: go_stone("w", self.vox)}
-        self.static = self._build_static()
+        self.cell = CELL.get(n, 8)
+        self.margin = MARGIN.get(n, 11)
+        size = self.margin * 2 + self.cell * (n - 1) + 1
+        self.tex_size = (size, size)
+        d = self.cell - 1 if self.cell > 8 else self.cell
+        self.stones = {gr.BLACK: stone_sprite(d, "b"), gr.WHITE: stone_sprite(d, "w")}
+        self.small = {gr.BLACK: stone_sprite(max(5, d // 2), "b"), gr.WHITE: stone_sprite(max(5, d // 2), "w")}
+        self._static = {}
 
-    def point_world(self, x, y):
+    def _disp(self, x, y):
         n = self.game.size
-        return np.array([(x - (n - 1) / 2) * self.s, 0.0, ((n - 1) / 2 - y) * self.s], dtype=np.float32)
+        return (n - 1 - x, n - 1 - y) if self.flipped else (x, y)
 
-    def world_to_point(self, p):
-        if p is None:
-            return None
+    def point_xy(self, x, y):
+        dx, dy = self._disp(x, y)
         n = self.game.size
-        x = round(p[0] / self.s + (n - 1) / 2)
-        y = round((n - 1) / 2 - p[2] / self.s)
-        if 0 <= x < n and 0 <= y < n:
-            return (x, y)
+        return self.margin + dx * self.cell, self.margin + (n - 1 - dy) * self.cell
+
+    def pick_tex(self, px, py):
+        n = self.game.size
+        dx = round((px - self.margin) / self.cell)
+        dy = n - 1 - round((py - self.margin) / self.cell)
+        if 0 <= dx < n and 0 <= dy < n:
+            return self._disp(dx, dy)
         return None
 
-    def _build_static(self):
-        b = InstanceBatch()
-        build_room(b)
-        n, s = self.game.size, self.s
-        half = SPAN / 2 + s * 0.5 + 0.45
-        # bloco do goban (com pés curtos)
-        b.cube((0, -0.24, 0), (2 * half, 0.48, 2 * half), BOARD_WOOD, 1.0)
-        b.cube((0, -0.49, 0), (2 * half - 0.3, 0.02, 2 * half - 0.3), (0.5, 0.33, 0.18), 0.5)
-        # linhas
-        lw = 0.035
+    def cell_center(self, pt):
+        return self.point_xy(*pt)
+
+    def flip(self):
+        self.flipped = not self.flipped
+
+    def _static_surface(self):
+        if self.flipped in self._static:
+            return self._static[self.flipped]
+        w, h = self.tex_size
+        n = self.game.size
+        s = pygame.Surface((w, h), pygame.SRCALPHA)
+        s.fill(WOOD)
+        pygame.draw.rect(s, (240, 194, 124), (0, 0, w, 1))
+        pygame.draw.rect(s, (240, 194, 124), (0, 0, 1, h))
+        pygame.draw.rect(s, WOOD_DARK, (0, h - 2, w, 2))
+        pygame.draw.rect(s, WOOD_DARK, (w - 2, 0, 2, h))
+        for k in range(0, h, 5):   # veios
+            x0 = (k * 37) % w
+            pygame.draw.line(s, WOOD_DARK, (x0, k), (min(w - 3, x0 + 10 + k % 13), k))
         for i in range(n):
-            p = self.point_world(i, 0)
-            b.cube((p[0], 0.005, 0), (lw, 0.012, SPAN + lw), LINE, 0.0)
-            q = self.point_world(0, i)
-            b.cube((0, 0.005, q[2]), (SPAN + lw, 0.012, lw), LINE, 0.0)
-        # hoshi
+            x0, y0 = self.point_xy(i, 0)
+            x1, y1 = self.point_xy(i, n - 1)
+            pygame.draw.line(s, LINE, (x0, y0), (x1, y1))
+            x0, y0 = self.point_xy(0, i)
+            x1, y1 = self.point_xy(n - 1, i)
+            pygame.draw.line(s, LINE, (x0, y0), (x1, y1))
         for x, y in self.star_points():
-            p = self.point_world(x, y)
-            r = min(0.14, s * 0.22)
-            b.cube((p[0], 0.008, p[2]), (r, 0.014, r), LINE, 0.0)
-        # coordenadas
-        px = min(0.085, s * 0.13)
+            px, py = self.point_xy(x, y)
+            pygame.draw.rect(s, LINE, (px - 1, py - 1, 3, 3))
         for i in range(n):
-            letter = gr.LETTERS[i]
-            p = self.point_world(i, 0)
-            add_label(b, letter, (p[0], 0.0, SPAN / 2 + s * 0.25 + 0.25), px, LINE, height=0.01)
-            p = self.point_world(0, i)
-            add_label(b, str(i + 1), (-SPAN / 2 - s * 0.25 - 0.3, 0.0, p[2]), px, LINE, height=0.01)
-        # potes de pedras
-        bpos, bcol = go_bowl(0.09)
-        for color, x in ((gr.BLACK, half + 1.6), (gr.WHITE, -half - 1.6)):
-            off = np.array([x, TABLE_TOP, 1.5], dtype=np.float32)
-            b.model(bpos, bcol, off, voxel=0.09, mat=0.6)
-            spos, scol = go_stone("b" if color == gr.BLACK else "w", 0.04)
-            rng = np.random.default_rng(color)
-            offs = []
-            for k in range(14):
-                a, r = rng.random() * 6.28, rng.random() * 0.62
-                offs.append((x + math.cos(a) * r, TABLE_TOP + 0.12 + (k // 6) * 0.12, 1.5 + math.sin(a) * r))
-            b.models_many(spos, scol, offs, voxel=0.04)
-            # tampa ao lado (onde ficam os prisioneiros)
-            b.cube((x, TABLE_TOP + 0.05, -1.4), (1.6, 0.1, 1.6), (0.48, 0.28, 0.15), 0.8)
-        return as_static(b)
+            px, py = self.point_xy(i, 0)
+            ch = gr.LETTERS[i]
+            draw_tiny(s, ch, px - 1, h - self.margin + 4 if self.margin > 10 else h - 6, LINE)
+            px, py = self.point_xy(0, i)
+            label = str(i + 1)
+            draw_tiny(s, label, max(1, px - tiny_width(label) - 3), py - 2, LINE)
+        self._static[self.flipped] = s
+        return s
 
     def star_points(self):
         n = self.game.size
-        if n == 19:
-            c = (3, 9, 15)
-        elif n == 13:
-            c = (3, 6, 9)
-        else:
+        c = {19: (3, 9, 15), 13: (3, 6, 9)}.get(n)
+        if not c:
             return [(2, 2), (6, 2), (4, 4), (2, 6), (6, 6)]
         return [(x, y) for x in c for y in c]
 
-    def lid_offsets(self, color, count):
-        half = SPAN / 2 + self.s * 0.5 + 0.45
-        x0 = half + 1.6 if color == gr.BLACK else -half - 1.6
-        offs = []
-        for k in range(min(count, 60)):
-            layer, i = divmod(k, 16)
-            gx, gz = i % 4, i // 4
-            offs.append((x0 - 0.54 + gx * 0.36, TABLE_TOP + 0.1 + layer * 0.17, -1.4 - 0.54 + gz * 0.36))
-        return offs
-
     # ------------------------------------------------------------ estado
-    def toast(self, text):
-        self.message = (text, self.time)
-
     def estimate(self):
         key = (self.game.board.key(), self.game.komi)
         if key != self._est_key:
@@ -149,24 +134,19 @@ class GoScene:
 
     def _sync_tally(self):
         f = self.game.final if self.game.phase == "over" else None
-        winner = f["winner"] if f else None
-        key = (id(self.game.final), winner) if f else None
+        key = (id(f), f["winner"]) if f else None
         if key == self.counted:
             return
         if self.counted and self.counted[1]:
             self.tally[self.counted[1]] -= 1
-        if f and winner:
-            self.tally[winner] += 1
+        if f and f["winner"]:
+            self.tally[f["winner"]] += 1
         self.counted = key
 
     # ------------------------------------------------------------ comandos
     def toggle_mode(self):
-        if self.mode == "jogo":
-            self.mode = "livre"
-            self.toast("Modo livre: coloque/remova pedras à vontade (sem regras)")
-        else:
-            self.mode = "jogo"
-            self.toast("Modo jogo: regras oficiais")
+        self.mode = "livre" if self.mode == "jogo" else "jogo"
+        self.toast("Modo livre: sem regras" if self.mode == "livre" else "Modo jogo: regras oficiais")
 
     def reset(self):
         if self.mode == "livre":
@@ -175,8 +155,9 @@ class GoScene:
         else:
             self.game.reset()
             self.counted = None
-            self.toast(f"Nova partida {self.game.size}x{self.game.size}")
+            self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
         self.drop = None
+        self.emit("sheen")
 
     def undo(self):
         if self.mode == "livre":
@@ -191,16 +172,11 @@ class GoScene:
         self.game.reset(n)
         self.counted = None
         self.drop = None
-        self._setup_geometry()
+        self._setup()
+        self.emit("sheen")
         self.toast(f"Goban {n}x{n}")
 
     # ------------------------------------------------------------ entrada
-    def set_hover(self, cell):
-        self.hover = cell
-
-    def pick(self, camera, mx, my, w, h):
-        return self.world_to_point(camera.pick_plane(mx, my, w, h, 0.0))
-
     def click(self, pt, shift=False):
         if pt is None:
             return
@@ -208,24 +184,39 @@ class GoScene:
         x, y = pt
         if self.mode == "livre":
             if g.board.get(x, y) != gr.EMPTY:
+                self._burst(x, y, g.board.get(x, y), 30)
                 g.board.set(x, y, gr.EMPTY)
             else:
-                color = gr.opp(self.free_color) if shift else self.free_color
-                g.board.set(x, y, color)
+                g.board.set(x, y, gr.opp(self.free_color) if shift else self.free_color)
                 self.drop = (x, y, self.time)
             return
         if g.phase == "scoring":
-            g.toggle_dead(x, y)
+            if g.board.get(x, y) != gr.EMPTY:
+                g.toggle_dead(x, y)
+                self.emit("shake", 1)
             return
         if g.phase != "play":
             return
+        mover = g.turn
         ok, msg, captured = g.try_play(x, y)
         if not ok:
             self.toast(msg)
+            self.emit("shake", 2)
             return
         self.drop = (x, y, self.time)
         if captured:
-            self.toast(f"{len(captured)} pedra(s) capturada(s)!")
+            for cx, cy in captured:
+                self._burst(cx, cy, gr.opp(mover))
+            px, py = self.point_xy(x, y)
+            self.emit("popup", f"+{len(captured)}", (90, 170, 255) if mover == gr.BLACK else (255, 90, 90),
+                      (px, py))
+            self.emit("shake", 2 + len(captured))
+            if len(captured) >= 5:
+                self.emit("banner", "CAPTURA GRANDE!", (255, 214, 90))
+
+    def _burst(self, x, y, color, power=55):
+        px, py = self.point_xy(x, y)
+        self.particles.burst_sprite(self.stones[color], px, py, power)
 
     def key(self, key, mod):
         g = self.game
@@ -254,7 +245,6 @@ class GoScene:
             if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 board = g.board.copy()
                 turn = gr.opp(self.free_color) if shift else self.free_color
-                # remove grupos sem liberdades antes de começar
                 for _c, stones, libs in board.all_groups():
                     if not libs:
                         for sx, sy in stones:
@@ -262,25 +252,33 @@ class GoScene:
                 g.reset(board=board, turn=turn)
                 self.counted = None
                 self.mode = "jogo"
-                self.toast(f"Partida iniciada desta posição - vez das {gr.COLOR_NAME[turn]}")
+                self.emit("banner", "VALENDO!", (255, 214, 90))
+                self.toast(f"Vez das {NAME[turn]}")
                 return True
             return False
         if key == pygame.K_p and g.phase == "play":
             g.pass_turn()
             if g.phase == "scoring":
-                self.toast("Dois passes: contagem! Clique nos grupos mortos e Enter para confirmar")
+                self.emit("banner", "CONTAGEM!", (255, 214, 90))
+                self.emit("sheen")
+                self.toast("Clique nos grupos mortos. Enter confirma")
             else:
-                self.toast(f"{gr.COLOR_NAME[gr.opp(g.turn)]} passaram")
+                self.toast(f"{NAME[gr.opp(g.turn)]} passaram")
             return True
         if key == pygame.K_g and g.phase == "play":
             g.resign()
             self._sync_tally()
+            self.emit("banner", "DESISTÊNCIA", (255, 150, 90))
             self.toast(g.final["text"])
             return True
         if g.phase == "scoring":
             if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 g.finish_scoring()
                 self._sync_tally()
+                w = g.final["winner"]
+                self.emit("banner", f"{NAME[w].upper()} VENCEM!" if w else "EMPATE!", (255, 214, 90))
+                self.emit("confetti")
+                self.emit("shake", 6)
                 self.toast(g.final["text"])
                 return True
             if key == pygame.K_v:
@@ -294,149 +292,125 @@ class GoScene:
         return False
 
     # ------------------------------------------------------------ desenho
-    def update(self, dt):
-        self.time += dt
-
-    def build(self, batch: InstanceBatch):
-        batch.add_array(self.static)
-        g = self.game
+    def draw_board(self, surf):
+        surf.blit(self._static_surface(), (0, 0))
+        g, t = self.game, self.time
         n = g.size
         dead = g.dead if g.phase in ("scoring", "over") else set()
-        groups = {gr.BLACK: [], gr.WHITE: []}
-        dead_list = []
-        drop_off = None
+
+        terr = None
+        if g.phase in ("scoring", "over"):
+            terr = dict(g.area_score()["terr_map"])
+            for (x, y) in dead:
+                terr[(x, y)] = gr.opp(g.board.get(x, y))
+        elif self.show_terr or self.mode == "livre":
+            terr = self.estimate()["terr_map"] if self.show_terr else None
+
         for y in range(n):
             for x in range(n):
                 c = g.board.get(x, y)
                 if c == gr.EMPTY:
                     continue
-                p = self.point_world(x, y)
+                px, py = self.point_xy(x, y)
+                spr = self.stones[c]
                 if self.drop and (x, y) == self.drop[:2]:
-                    t = min(1.0, (self.time - self.drop[2]) / DROP_TIME)
-                    if t < 1.0:
-                        drop_off = (c, p + np.array([0, (1 - t) ** 2 * 1.2, 0], dtype=np.float32))
-                        continue
+                    k = (t - self.drop[2]) / DROP_TIME
+                    if k < 1.0:
+                        sc = 1.0 + (1.0 - ease_out_back(k, 2.5)) * 0.8
+                        d = spr.get_width()
+                        spr = pygame.transform.scale(spr, (max(2, round(d * sc)), max(2, round(d * sc))))
                 if (x, y) in dead:
-                    dead_list.append((c, p))
-                else:
-                    groups[c].append(p)
-        for c, offs in groups.items():
-            pos, col = self.stone[c]
-            batch.models_many(pos, col, offs, voxel=self.vox)
-        if drop_off:
-            pos, col = self.stone[drop_off[0]]
-            batch.model(pos, col, drop_off[1], voxel=self.vox)
-        for c, p in dead_list:
-            pos, col = self.stone[c]
-            batch.model(pos, col, p, voxel=self.vox, tint=(0.8, 0.3, 0.3))
+                    spr = spr.copy()
+                    spr.set_alpha(110)
+                w = spr.get_width()
+                shadow = pygame.Surface((w, w), pygame.SRCALPHA)
+                pygame.draw.ellipse(shadow, (40, 20, 10, 90), (0, 0, w, w))
+                surf.blit(shadow, (px - w // 2 + 1, py - w // 2 + 1))
+                surf.blit(spr, (px - w // 2, py - w // 2))
+                if (x, y) in dead:
+                    r = max(2, self.cell // 4)
+                    pygame.draw.line(surf, (255, 70, 70), (px - r, py - r), (px + r, py + r))
+                    pygame.draw.line(surf, (255, 70, 70), (px - r, py + r), (px + r, py - r))
 
-        # prisioneiros nas tampas
-        for color in (gr.BLACK, gr.WHITE):
-            pris = g.captures[color]
-            if pris:
-                # prisioneiros de `color` são pedras da cor oposta
-                pc = gr.opp(color)
-                spos, scol = go_stone("b" if pc == gr.BLACK else "w", 0.04)
-                batch.models_many(spos, scol, self.lid_offsets(color, pris), voxel=0.04)
-
-        # território
-        terr = None
-        if g.phase in ("scoring", "over"):
-            terr = g.area_score()["terr_map"]
-            for (x, y) in dead:
-                terr[(x, y)] = gr.opp(g.board.get(x, y))
-        elif self.show_terr:
-            terr = self.estimate()["terr_map"]
         if terr:
-            sz = self.s * 0.32
+            pulse = 1 if int(t * 3) % 2 else 0
             for (x, y), owner in terr.items():
-                p = self.point_world(x, y)
-                h = 0.03 if g.board.get(x, y) == gr.EMPTY else self.vox * 5.3
-                batch.cube((p[0], h, p[2]), (sz, 0.04, sz), TERR[owner], 2.0)
+                px, py = self.point_xy(x, y)
+                r = max(1, self.cell // 7) + pulse
+                col = (30, 28, 40) if owner == gr.BLACK else (250, 250, 245)
+                pygame.draw.rect(surf, OUTLINE, (px - r - 1, py - r - 1, 2 * r + 2, 2 * r + 2))
+                pygame.draw.rect(surf, col, (px - r, py - r, 2 * r, 2 * r))
 
-        # última jogada
         if self.mode == "jogo" and isinstance(g.last_move, tuple):
             x, y = g.last_move
-            if g.board.get(x, y) != gr.EMPTY and not (drop_off and self.drop[:2] == (x, y)):
-                p = self.point_world(x, y)
-                sz = self.s * 0.22
-                batch.cube((p[0], self.vox * 5.2, p[2]), (sz, 0.03, sz), (0.95, 0.30, 0.25), 2.0)
+            if g.board.get(x, y) != gr.EMPTY:
+                px, py = self.point_xy(x, y)
+                r = max(1, self.cell // 6)
+                pygame.draw.rect(surf, (255, 70, 70), (px - r, py - r, 2 * r, 2 * r))
 
-        # cursor / pedra fantasma
         if self.hover:
             x, y = self.hover
-            p = self.point_world(x, y)
-            if self.mode == "livre":
-                col = (0.95, 0.85, 0.35) if g.board.get(x, y) == gr.EMPTY else (0.95, 0.35, 0.3)
-                self._ring(batch, p, col)
-            elif g.phase == "play":
-                if self.hover_legal():
-                    pos, ccol = self.stone[g.turn]
-                    bob = 0.25 + 0.05 * math.sin(self.time * 5)
-                    batch.model(pos, ccol, p + np.array([0, bob, 0], dtype=np.float32), voxel=self.vox,
-                                scale=0.8)
-                    self._ring(batch, p, (0.95, 0.85, 0.35))
-                else:
-                    self._ring(batch, p, (0.95, 0.35, 0.3))
-            elif g.phase == "scoring" and g.board.get(x, y) != gr.EMPTY:
-                self._ring(batch, p, (0.95, 0.35, 0.3))
-
-    def _ring(self, batch, p, col):
-        r = self.s * 0.5
-        t = 0.03
-        for dx, dz, sx, sz in ((0, -r, 2 * r, t), (0, r, 2 * r, t), (-r, 0, t, 2 * r), (r, 0, t, 2 * r)):
-            batch.cube((p[0] + dx, 0.02, p[2] + dz), (sx, 0.03, sz), col, 2.0)
+            px, py = self.point_xy(x, y)
+            h = self.cell // 2
+            ok = (self.mode == "livre" and g.board.get(x, y) == gr.EMPTY) or \
+                 (self.mode == "jogo" and g.phase == "play" and self.hover_legal())
+            if ok:
+                c = self.free_color if self.mode == "livre" else g.turn
+                ghost = self.stones[c].copy()
+                ghost.set_alpha(140 + int(60 * math.sin(t * 6)))
+                w = ghost.get_width()
+                surf.blit(ghost, (px - w // 2, py - w // 2 - 1))
+            col = (255, 238, 120) if ok else (255, 90, 90)
+            b = 1 if int(t * 4) % 2 else 0
+            pygame.draw.rect(surf, col, (px - h - b, py - h - b, 2 * (h + b) + 1, 2 * (h + b) + 1), 1)
+        self.particles.draw(surf)
 
     # ------------------------------------------------------------ HUD
     def hud(self):
         g = self.game
-        mode = "MODO JOGO" if self.mode == "jogo" else "MODO LIVRE"
-        title = f"GO {g.size}x{g.size}  ·  {mode}"
-        lines = []
-        cap = f"Capturas  Pretas {g.captures[gr.BLACK]}  ·  Brancas {g.captures[gr.WHITE]}"
+        d = {"title": "GO", "mode": f"{g.size}x{g.size}  ·  " + ("Modo Jogo" if self.mode == "jogo" else "Modo Livre"),
+             "accent": (32, 190, 160), "lines": [], "icons": None,
+             "tally": ("PARTIDAS", f"{self.tally[gr.BLACK]}", f"{self.tally[gr.WHITE]}"),
+             "tally_names": ("P", "B")}
+        cap = (f"Capturas  Pretas {g.captures[gr.BLACK]}  ·  Brancas {g.captures[gr.WHITE]}", (200, 210, 230))
         if self.mode == "livre":
             est = self.estimate()
-            lines.append((f"Cor ao clicar: {gr.COLOR_NAME[self.free_color]} (C troca, Shift inverte)",
-                          (255, 230, 150)))
-            lines.append((f"Estimativa (área)  Pretas {est['black']:g}  ·  Brancas {est['white']:g}"
-                          f"  (komi {g.komi})", (210, 230, 255)))
-            hints = ["Clique: colocar/remover", "C: cor", "Enter: jogar desta posição", "R: limpar",
-                     "B: tamanho", "T: território", "M: modo jogo"]
-            return title, lines, hints
+            d["scores"] = [("PRETAS", est["black"], (60, 60, 80)), ("BRANCAS", est["white"], (230, 226, 210))]
+            d["status"] = (f"Clique põe pedras {NAME[self.free_color].lower()}", (255, 255, 255))
+            d["lines"] += [("Estimativa por área, komi " + f"{g.komi:g}", (200, 210, 230)),
+                           ("Enter: jogar desta posição", (150, 240, 170))]
+            d["hints"] = [("Clique", "pôr/tirar"), ("C", "cor"), ("Enter", "jogar"), ("R", "limpar"),
+                          ("B", "tamanho"), ("T", "território"), ("M", "jogo")]
+            return d
         if g.phase == "play":
+            est = self.estimate()
+            d["scores"] = [("PRETAS", est["black"], (60, 60, 80)), ("BRANCAS", est["white"], (230, 226, 210))]
             last = ""
             if g.last_move == "pass":
-                last = "  (adversário passou)"
+                last = " (passou)"
             elif isinstance(g.last_move, tuple):
-                last = f"  (último: {gr.coord_name(*g.last_move)})"
-            lines.append((f"Vez das {gr.COLOR_NAME[g.turn]}  ·  jogada {g.move_number + 1}{last}",
-                          (255, 255, 255)))
-            lines.append((cap, (200, 200, 220)))
-            est = self.estimate()
+                last = f" (último {gr.coord_name(*g.last_move)})"
+            d["status"] = (f"Vez das {NAME[g.turn]}{last}", (255, 255, 255))
             diff = est["black"] - est["white"]
-            lead = f"Pretas +{diff:g}" if diff > 0 else (f"Brancas +{-diff:g}" if diff < 0 else "empate")
-            lines.append((f"Estimativa  Pretas {est['black']:g}  ·  Brancas {est['white']:g}  ({lead}, komi {g.komi})",
-                          (210, 230, 255)))
-            hints = ["Clique: jogar", "P: passar", "G: desistir", "Z: desfazer", "T: território",
-                     "K: komi", "B: tamanho", "R: nova", "M: modo livre"]
+            lead = "empate" if diff == 0 else (f"Pretas +{diff:g}" if diff > 0 else f"Brancas +{-diff:g}")
+            d["lines"] += [(f"Estimativa: {lead} (komi {g.komi:g})", (200, 210, 230)), cap]
+            d["hints"] = [("Clique", "jogar"), ("P", "passar"), ("G", "desistir"), ("Z", "desfazer"),
+                          ("T", "território"), ("K", "komi"), ("B", "tamanho"), ("R", "nova"), ("M", "livre")]
         elif g.phase == "scoring":
             s = g.area_score()
-            lines.append(("CONTAGEM: clique nos grupos mortos (vermelhos) para alternar", (255, 230, 120)))
-            lines.append((f"Área (chinesa)  Pretas {s['black']:g}  ·  Brancas {s['white']:g}  (komi {g.komi})",
-                          (210, 230, 255)))
-            lines.append((f"Território (japonesa)  Pretas {s['jp_black']:g}  ·  Brancas {s['jp_white']:g}",
-                          (190, 200, 230)))
-            hints = ["Clique: marcar morta", "Enter: confirmar", "U: sugestão automática",
-                     "V: voltar a jogar", "Z: desfazer"]
+            d["scores"] = [("PRETAS", s["black"], (60, 60, 80)), ("BRANCAS", s["white"], (230, 226, 210))]
+            d["status"] = ("CONTAGEM!", (255, 230, 120))
+            d["lines"] += [("Clique nos grupos mortos (X vermelho)", (255, 230, 150)),
+                           ("Área (chinesa), komi " + f"{g.komi:g}", (200, 210, 230)),
+                           (f"Território: P {s['jp_black']:g}  ·  B {s['jp_white']:g}", (190, 200, 230))]
+            d["hints"] = [("Clique", "morta/viva"), ("Enter", "confirmar"), ("U", "sugerir"),
+                          ("V", "voltar"), ("Z", "desfazer")]
         else:
             f = g.final
-            lines.append((f["text"], (255, 220, 120)))
+            d["scores"] = [("PRETAS", f["black"], (60, 60, 80)), ("BRANCAS", f["white"], (230, 226, 210))]
+            d["status"] = (f["text"], (255, 214, 90))
             if f.get("margin") is not None:
-                lines.append((f"Área  Pretas {f['black']:g}  ·  Brancas {f['white']:g}  (komi {g.komi})",
-                              (210, 230, 255)))
-                lines.append((f"Território  Pretas {f['jp_black']:g}  ·  Brancas {f['jp_white']:g}",
-                              (190, 200, 230)))
-            hints = ["R: nova partida", "Z: desfazer", "K: komi", "B: tamanho", "M: modo livre"]
-        lines.append((f"Placar de partidas  Pretas {self.tally[gr.BLACK]}  x  {self.tally[gr.WHITE]} Brancas",
-                      (255, 200, 140)))
-        return title, lines, hints
+                d["lines"].append((f"Território: P {f['jp_black']:g}  ·  B {f['jp_white']:g}", (190, 200, 230)))
+            d["lines"].append(cap)
+            d["hints"] = [("R", "nova"), ("Z", "desfazer"), ("K", "komi"), ("B", "tamanho"), ("M", "livre")]
+        return d

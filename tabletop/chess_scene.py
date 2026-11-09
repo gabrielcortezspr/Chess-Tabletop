@@ -1,49 +1,39 @@
-"""Cena do xadrez: tabuleiro, peças voxel, interação nos modos Jogo e Livre."""
+"""Mesa de xadrez em pixel art: modos Jogo e Livre, animações e placar."""
 from __future__ import annotations
 
 import math
 
-import numpy as np
 import pygame
 
 from . import chess_rules as cr
-from .renderer import InstanceBatch, arc, smoothstep
-from .scene_common import TABLE_TOP, add_label, as_static, build_room, mix
-from .voxels import chess_models
+from .fx import ease_out_back
+from .pixelart import OUTLINE, draw_tiny, piece_sprites, silhouette
+from .scene_base import SceneBase
 
-VOX = 1.0 / 15.0
-LIGHT_SQ = (0.86, 0.76, 0.58)
-DARK_SQ = (0.45, 0.28, 0.17)
-FRAME = (0.26, 0.15, 0.09)
-TRAY = (0.33, 0.20, 0.12)
-SEL = (0.98, 0.85, 0.30)
-LAST = (0.70, 0.80, 0.35)
-CHECK = (0.95, 0.25, 0.20)
-HOVER = (1.0, 1.0, 1.0)
-MOVE_DOT = (0.35, 0.95, 0.55)
-CAPTURE_MARK = (1.0, 0.35, 0.30)
+SQ = 18           # tamanho da casa em pixels da textura
+FR = 9            # largura da moldura
+BOARD = 8 * SQ + 2 * FR
+TRAY_W = 2 * SQ + 8
+GAP = 6
+TEX_W = TRAY_W + GAP + BOARD + GAP + TRAY_W
+TEX_H = BOARD
+BOARD_X = TRAY_W + GAP
+
+LIGHT = (232, 214, 176)
+DARK = (176, 112, 82)
+FRAME = (86, 50, 46)
+FRAME_HI = (124, 76, 64)
+FELT = (46, 104, 84)
+FELT_DARK = (34, 78, 64)
+LAST = (246, 214, 92)
+SELECT = (255, 238, 120)
+CHECK = (254, 72, 72)
+MOVE = (90, 230, 140)
 
 TRAY_FILES = (-3, -2, 9, 10)
-TRAY_Y = TABLE_TOP + 0.08
-ANIM_TIME = 0.32
-
+MOVE_TIME = 0.30
+LAND_TIME = 0.22
 COLOR_PT = {"w": "Brancas", "b": "Pretas"}
-
-
-def cell_center(cell):
-    f, r = cell
-    y = 0.0 if 0 <= f < 8 else TRAY_Y
-    return np.array([f - 3.5, y, 3.5 - r], dtype=np.float32)
-
-
-def world_to_cell(p):
-    if p is None:
-        return None
-    f = math.floor(p[0] + 4)
-    r = math.floor(4 - p[2])
-    if 0 <= r < 8 and (0 <= f < 8 or f in TRAY_FILES):
-        return (f, r)
-    return None
 
 
 def standard_free_layout():
@@ -51,54 +41,70 @@ def standard_free_layout():
     return {(cr.file_of(i), cr.rank_of(i)): p for i, p in enumerate(pos.board) if p}
 
 
-class ChessScene:
+def _tint(surf, rect, color, alpha):
+    t = pygame.Surface(rect[2:], pygame.SRCALPHA)
+    t.fill((*color, alpha))
+    surf.blit(t, rect[:2])
+
+
+class ChessScene(SceneBase):
     name = "Xadrez"
-    focus_radius = 6.5
+    theme = ((0.87, 0.27, 0.23), (0.0, 0.42, 0.71), (0.09, 0.10, 0.16))
+    tex_size = (TEX_W, TEX_H)
 
     def __init__(self):
-        self.models = chess_models(VOX)
+        super().__init__()
+        self.sprites = piece_sprites()
+        self.glow = {k: silhouette(s, (255, 250, 200)) for k, s in self.sprites.items()}
         self.game = cr.ChessGame()
-        self.mode = "jogo"            # "jogo" | "livre"
         self.free = standard_free_layout()
         self.held = None              # (peça, célula de origem) no modo livre
-        self.selected = None          # casa selecionada no modo jogo
-        self.pending_promo = None     # (frm, to)
-        self.hover = None
-        self.anims = {}               # célula destino -> (célula origem, t0)
-        self.time = 0.0
+        self.selected = None
+        self.pending_promo = None
+        self.flipped = False
+        self.anims = {}               # célula -> (origem, t0)
+        self.lands = {}               # célula -> t0 (quique ao pousar)
         self.tally = {"w": 0.0, "b": 0.0}
-        self.counted = None           # resultado já somado ao placar
-        self.message = ("", 0.0)
-        self.static = self._build_static()
+        self.counted = None
+        self._static = {}
 
-    # ------------------------------------------------------------ utilidades
-    def toast(self, text):
-        self.message = (text, self.time)
+    # ------------------------------------------------------------ geometria
+    def _disp(self, cell):
+        f, r = cell
+        return (7 - f, 7 - r) if self.flipped else (f, r)
 
-    def _build_static(self):
-        b = InstanceBatch()
-        build_room(b)
-        # moldura do tabuleiro
-        b.cube((0, TABLE_TOP / 2 - 0.02, 0), (9.3, -TABLE_TOP - 0.04, 9.3), FRAME, 0.7)
-        b.cube((0, -0.07, 0), (8.12, 0.06, 8.12), (0.15, 0.09, 0.05), 0.0)
-        # coordenadas gravadas na moldura
-        label = (0.88, 0.74, 0.45)
-        for f in range(8):
-            ch = "ABCDEFGH"[f]
-            add_label(b, ch, (f - 3.5, -0.04, 4.33), 0.085, label)
-            add_label(b, ch, (f - 3.5, -0.04, -4.33), 0.085, label, 180)
-        for r in range(8):
-            add_label(b, str(r + 1), (-4.33, -0.04, 3.5 - r), 0.085, label)
-            add_label(b, str(r + 1), (4.33, -0.04, 3.5 - r), 0.085, label, 180)
-        # bandejas laterais para peças fora do tabuleiro
-        for x in (-6.0, 6.0):
-            b.cube((x, TABLE_TOP + 0.04, 0), (2.3, 0.08, 8.3), TRAY, 0.8)
-            b.cube((x, TABLE_TOP + 0.05, 0), (2.05, 0.08, 8.05), (0.16, 0.30, 0.20), 0.9)
-        return as_static(b)
+    def cell_xy(self, cell):
+        """Canto superior esquerdo da célula na textura."""
+        f, r = self._disp(cell)
+        y = FR + (7 - r) * SQ
+        if 0 <= f < 8:
+            x = BOARD_X + FR + f * SQ
+        elif f < 0:
+            x = 4 + (f + 3) * SQ
+        else:
+            x = BOARD_X + BOARD + GAP + 4 + (f - 9) * SQ
+        return x, y
 
-    # ------------------------------------------------------------ estado atual
+    def cell_center(self, cell):
+        x, y = self.cell_xy(cell)
+        return x + SQ / 2, y + SQ / 2
+
+    def pick_tex(self, px, py):
+        r = 7 - math.floor((py - FR) / SQ)
+        if not 0 <= r < 8:
+            return None
+        if BOARD_X + FR <= px < BOARD_X + FR + 8 * SQ:
+            f = math.floor((px - BOARD_X - FR) / SQ)
+        elif 4 <= px < 4 + 2 * SQ:
+            f = math.floor((px - 4) / SQ) - 3
+        elif BOARD_X + BOARD + GAP + 4 <= px < BOARD_X + BOARD + GAP + 4 + 2 * SQ:
+            f = math.floor((px - BOARD_X - BOARD - GAP - 4) / SQ) + 9
+        else:
+            return None
+        return self._disp((f, r))   # _disp é a sua própria inversa
+
+    # ------------------------------------------------------------ estado
     def layout(self):
-        """Dicionário célula -> peça para desenhar (tabuleiro + bandejas)."""
         if self.mode == "livre":
             return dict(self.free)
         out = {}
@@ -116,8 +122,7 @@ class ChessScene:
         for (f, r), p in self.free.items():
             if 0 <= f < 8:
                 board[cr.sq(f, r)] = p
-        pos = cr.Position(board, turn, cr.infer_castling(board), None, 0, 1)
-        return pos
+        return cr.Position(board, turn, cr.infer_castling(board), None, 0, 1)
 
     # ------------------------------------------------------------ comandos
     def toggle_mode(self):
@@ -126,24 +131,29 @@ class ChessScene:
             self.free = self.layout()
             self.selected = None
             self.pending_promo = None
-            self.toast("Modo livre: mova qualquer peça para qualquer lugar")
+            self.toast("Modo livre: mova qualquer peça")
         else:
             self._return_held()
             self.mode = "jogo"
-            self.toast("Modo jogo: regras oficiais (a partida anterior continua)")
+            self.toast("Modo jogo: regras oficiais")
+
+    def flip(self):
+        self.flipped = not self.flipped
 
     def start_from_free(self, turn):
         self._return_held()
         pos = self.free_position(turn)
         err = cr.validate_position(pos)
         if err:
-            self.toast("Posição inválida: " + err)
+            self.toast(err)
+            self.emit("shake", 3)
             return
         self.game = cr.ChessGame(pos)
         self.counted = None
         self.mode = "jogo"
         self.anims.clear()
-        self.toast(f"Partida iniciada desta posição - vez das {COLOR_PT[turn]}")
+        self.emit("banner", "VALENDO!", (255, 214, 90))
+        self.toast(f"Vez das {COLOR_PT[turn]}")
 
     def reset(self):
         if self.mode == "livre":
@@ -156,7 +166,8 @@ class ChessScene:
             self.selected = None
             self.pending_promo = None
             self.anims.clear()
-            self.toast("Nova partida")
+            self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
+        self.emit("sheen")
 
     def undo(self):
         if self.mode == "livre":
@@ -169,24 +180,18 @@ class ChessScene:
             self.toast("Lance desfeito")
 
     def _sync_tally(self):
-        """Mantém o placar de partidas em dia com o resultado atual."""
         res = self.game.result
         if res == self.counted:
             return
-        if self.counted:
-            self._apply_result(self.counted, -1)
-        if res:
-            self._apply_result(res, +1)
+        for r, sign in ((self.counted, -1), (res, 1)):
+            if r == "1-0":
+                self.tally["w"] += sign
+            elif r == "0-1":
+                self.tally["b"] += sign
+            elif r:
+                self.tally["w"] += 0.5 * sign
+                self.tally["b"] += 0.5 * sign
         self.counted = res
-
-    def _apply_result(self, res, sign):
-        if res == "1-0":
-            self.tally["w"] += sign
-        elif res == "0-1":
-            self.tally["b"] += sign
-        else:
-            self.tally["w"] += 0.5 * sign
-            self.tally["b"] += 0.5 * sign
 
     def _return_held(self):
         if self.held:
@@ -198,31 +203,13 @@ class ChessScene:
 
     def _free_tray_cell(self, color):
         files = (-2, -3) if color == "b" else (9, 10)
-        for f in files:
-            for r in range(8):
-                if (f, r) not in self.free:
-                    return (f, r)
-        for f in TRAY_FILES:
+        for f in files + tuple(f for f in TRAY_FILES if f not in files):
             for r in range(8):
                 if (f, r) not in self.free:
                     return (f, r)
         return None
 
     # ------------------------------------------------------------ entrada
-    def set_hover(self, cell):
-        self.hover = cell
-
-    def pick(self, camera, mx, my, w, h):
-        p = camera.pick_plane(mx, my, w, h, 0.0)
-        c = world_to_cell(p)
-        if c and 0 <= c[0] < 8:
-            return c
-        p = camera.pick_plane(mx, my, w, h, TRAY_Y)
-        c = world_to_cell(p)
-        if c and c[0] in TRAY_FILES:
-            return c
-        return None
-
     def click(self, cell, shift=False):
         if self.mode == "livre":
             self._click_free(cell)
@@ -234,9 +221,11 @@ class ChessScene:
             return
         here = self.free.get(cell)
         if self.held:
-            piece, _origin = self.held
+            piece, _ = self.held
             self.free[cell] = piece
-            self.anims[cell] = (None, self.time)
+            self.lands[cell] = self.time
+            x, y = self.cell_center(cell)
+            self.particles.dust(x, y + 7)
             self.held = (here, cell) if here else None
         elif here:
             self.held = (here, cell)
@@ -251,35 +240,38 @@ class ChessScene:
             return
         s = cr.sq(*cell)
         piece = g.pos.board[s]
-        if self.selected is not None:
+        if self.selected is not None and any(m.to == s for m in g.moves_from(self.selected)):
             frm = self.selected
-            if any(m.to == s for m in g.moves_from(frm)):
-                if g.needs_promotion(frm, s):
-                    self.pending_promo = (frm, s)
-                    self.toast("Promoção! 1 Dama  2 Torre  3 Bispo  4 Cavalo")
-                    return
-                self._play(g.find_move(frm, s))
+            if g.needs_promotion(frm, s):
+                self.pending_promo = (frm, s)
+                self.toast("Promoção! 1 Dama  2 Torre  3 Bispo  4 Cavalo")
                 return
+            self._play(g.find_move(frm, s))
+            return
         if piece and piece[0] == g.pos.turn and g.moves_from(s):
             self.selected = s
         elif piece and piece[0] == g.pos.turn:
             self.selected = None
-            self.toast("Essa peça não tem lances legais")
+            self.toast("Essa peça não tem lances")
+            self.emit("shake", 1.5)
         else:
             self.selected = None
 
     def _play(self, move):
         g = self.game
-        before_caps = {c: len(g.captured_by(c)) for c in "wb"}
         mover = g.pos.turn
+        k = len(g.captured_by(mover))
         cap_sq = move.to
         if move.en_passant:
             cap_sq = cr.sq(cr.file_of(move.to), cr.rank_of(move.frm))
         captured = g.push(move)
         self.selected = None
         self.anims.clear()
-        to_cell = (cr.file_of(move.to), cr.rank_of(move.to))
-        self.anims[to_cell] = ((cr.file_of(move.frm), cr.rank_of(move.frm)), self.time)
+
+        def cell(s):
+            return (cr.file_of(s), cr.rank_of(s))
+
+        self.anims[cell(move.to)] = (cell(move.frm), self.time)
         if move.castle:
             rank = cr.rank_of(move.frm)
             if cr.file_of(move.to) == 6:
@@ -287,15 +279,28 @@ class ChessScene:
             else:
                 self.anims[(3, rank)] = ((0, rank), self.time)
         if captured:
-            k = before_caps[mover]
+            x, y = self.cell_center(cell(cap_sq))
+            self.particles.burst_sprite(self.sprites[captured], x, y)
             files = (9, 10) if mover == "w" else (-2, -3)
             if k < 16:
-                self.anims[(files[k // 8], k % 8)] = ((cr.file_of(cap_sq), cr.rank_of(cap_sq)), self.time)
+                self.anims[(files[k // 8], k % 8)] = (cell(cap_sq), self.time)
+            val = cr.PIECE_VALUES[captured[1]]
+            self.emit("popup", f"+{val}", (90, 170, 255) if mover == "w" else (255, 90, 90), (x, y))
+            self.emit("shake", 2 + val * 0.6)
+        if move.promo:
+            self.emit("banner", "PROMOÇÃO!", (255, 214, 90))
         self._sync_tally()
         if g.result:
+            if g.reason == "Xeque-mate":
+                self.emit("banner", "XEQUE-MATE!", (255, 90, 90))
+                self.emit("confetti")
+                self.emit("shake", 8)
+            else:
+                self.emit("banner", "EMPATE", (200, 200, 255))
             self.toast(self.result_text())
         elif g.pos.in_check():
-            self.toast("Xeque!")
+            self.emit("banner", "XEQUE!", (255, 90, 90))
+            self.emit("shake", 4)
 
     def key(self, key, mod):
         shift = bool(mod & pygame.KMOD_SHIFT)
@@ -323,7 +328,8 @@ class ChessScene:
                 loser = self.game.pos.turn
                 self.game.resign(loser)
                 self._sync_tally()
-                self.toast(f"{COLOR_PT[loser]} desistiram. " + self.result_text())
+                self.emit("banner", "DESISTÊNCIA", (255, 150, 90))
+                self.toast(self.result_text())
             return True
         if self.mode == "livre":
             kinds = {pygame.K_1: "P", pygame.K_2: "N", pygame.K_3: "B", pygame.K_4: "R",
@@ -332,24 +338,25 @@ class ChessScene:
                 self._return_held()
                 color = "b" if shift else "w"
                 self.held = ((color, kinds[key]), None)
-                self.toast(f"Nova peça na mão: {cr.PIECE_NAMES_PT[kinds[key]]} ({COLOR_PT[color]})")
                 return True
             if key == pygame.K_c and self.held:
                 (color, kind), origin = self.held
                 self.held = ((cr.other(color), kind), origin)
                 return True
             if key in (pygame.K_DELETE, pygame.K_BACKSPACE) and self.held:
+                cx, cy = self.cell_center(self.hover) if self.hover else (TEX_W / 2, TEX_H / 2)
+                self.particles.burst_sprite(self.sprites[self.held[0]], cx, cy, 40)
                 self.held = None
-                self.toast("Peça removida")
                 return True
             if key == pygame.K_x:
                 self._return_held()
                 self.free = {}
                 pieces = sorted(standard_free_layout().values(), key=lambda p: -cr.PIECE_VALUES[p[1]])
                 for p in pieces:
-                    cell = self._free_tray_cell(p[0])
-                    if cell:
-                        self.free[cell] = p
+                    c = self._free_tray_cell(p[0])
+                    if c:
+                        self.free[c] = p
+                self.emit("sheen")
                 self.toast("Tabuleiro vazio: peças nas bandejas")
                 return True
             if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -357,90 +364,134 @@ class ChessScene:
                 return True
         return False
 
+    def held_sprite(self):
+        return self.sprites[self.held[0]] if self.held else None
+
     # ------------------------------------------------------------ desenho
     def update(self, dt):
-        self.time += dt
-        done = [c for c, (_s, t0) in self.anims.items() if self.time - t0 > ANIM_TIME]
-        for c in done:
-            del self.anims[c]
+        super().update(dt)
+        for c, (_s, t0) in list(self.anims.items()):
+            if self.time - t0 > MOVE_TIME:
+                del self.anims[c]
+                self.lands[c] = self.time
+                x, y = self.cell_center(c)
+                self.particles.dust(x, y + 7, n=5)
+        for c, t0 in list(self.lands.items()):
+            if self.time - t0 > LAND_TIME:
+                del self.lands[c]
 
-    def build(self, batch: InstanceBatch):
-        batch.add_array(self.static)
-        g = self.game
-        last = g.last_move() if self.mode == "jogo" else None
-        check_sq = g.pos.king_square(g.pos.turn) if self.mode == "jogo" and g.pos.in_check() else None
-        targets = {}
+    def _static_surface(self):
+        key = self.flipped
+        if key in self._static:
+            return self._static[key]
+        s = pygame.Surface((TEX_W, TEX_H), pygame.SRCALPHA)
+        # bandejas de feltro
+        for x0 in (0, BOARD_X + BOARD + GAP):
+            pygame.draw.rect(s, FRAME, (x0, 0, TRAY_W, TEX_H))
+            pygame.draw.rect(s, FRAME_HI, (x0, 0, TRAY_W, 1))
+            pygame.draw.rect(s, FELT_DARK, (x0 + 3, 3, TRAY_W - 6, TEX_H - 6))
+            pygame.draw.rect(s, FELT, (x0 + 4, 4, TRAY_W - 8, TEX_H - 8))
+            for yy in range(6, TEX_H - 6, 4):
+                for xx in range(x0 + 6 + (yy // 4) % 2 * 2, x0 + TRAY_W - 6, 4):
+                    s.set_at((xx, yy), FELT_DARK)
+        # moldura
+        pygame.draw.rect(s, FRAME, (BOARD_X, 0, BOARD, BOARD))
+        pygame.draw.rect(s, FRAME_HI, (BOARD_X, 0, BOARD, 1))
+        pygame.draw.rect(s, FRAME_HI, (BOARD_X, 0, 1, BOARD))
+        pygame.draw.rect(s, OUTLINE, (BOARD_X + FR - 1, FR - 1, 8 * SQ + 2, 8 * SQ + 2))
+        for f in range(8):
+            for r in range(8):
+                x, y = self.cell_xy((f, r))
+                light = (f + r) % 2 == 1
+                pygame.draw.rect(s, LIGHT if light else DARK, (x, y, SQ, SQ))
+                for k in range(3):   # veios de madeira em pixels
+                    yy = y + 3 + k * 6 + (f * 3 + r) % 3
+                    col = (220, 200, 160) if light else (160, 100, 74)
+                    pygame.draw.line(s, col, (x + 2 + (r + k) % 4, yy), (x + 7 + (f + k) % 6, yy))
+        lab = (226, 190, 130)
+        for f in range(8):
+            x, _ = self.cell_center((f, 0))
+            draw_tiny(s, "ABCDEFGH"[f], int(x) - 1, BOARD - FR + 2, lab)
+        for r in range(8):
+            _, y = self.cell_center((0, r))
+            draw_tiny(s, str(r + 1), BOARD_X + 3, int(y) - 2, lab)
+        self._static[key] = s
+        return s
+
+    def draw_board(self, surf):
+        surf.blit(self._static_surface(), (0, 0))
+        g, t = self.game, self.time
+        if self.mode == "jogo":
+            last = g.last_move()
+            if last:
+                for s in (last.frm, last.to):
+                    _tint(surf, (*self.cell_xy((cr.file_of(s), cr.rank_of(s))), SQ, SQ), LAST, 90)
+            if g.pos.in_check() and not g.result:
+                k = g.pos.king_square(g.pos.turn)
+                _tint(surf, (*self.cell_xy((cr.file_of(k), cr.rank_of(k))), SQ, SQ), CHECK,
+                      int(120 + 80 * math.sin(t * 8)))
+            if self.selected is not None:
+                s = self.selected
+                _tint(surf, (*self.cell_xy((cr.file_of(s), cr.rank_of(s))), SQ, SQ), SELECT, 120)
+        if self.hover:
+            x, y = self.cell_xy(self.hover)
+            col = SELECT if (self.held or self.selected is not None) else (255, 255, 255)
+            b = 1 if int(t * 4) % 2 else 0
+            pygame.draw.rect(surf, col, (x - b, y - b, SQ + 2 * b, SQ + 2 * b), 1)
+
+        sel_cell = None
         if self.mode == "jogo" and self.selected is not None:
-            for m in g.moves_from(self.selected):
-                targets[m.to] = m
-        hover_sq = cr.sq(*self.hover) if self.hover and 0 <= self.hover[0] < 8 else None
-
-        # casas do tabuleiro (cores dinâmicas para destaques)
-        sq_arr = np.empty((64, 10), dtype=np.float32)
-        for s in range(64):
-            f, r = cr.file_of(s), cr.rank_of(s)
-            col = LIGHT_SQ if (f + r) % 2 else DARK_SQ
-            if last and s in (last.frm, last.to):
-                col = mix(col, LAST, 0.45)
-            if s == self.selected:
-                col = mix(col, SEL, 0.65)
-            if s == check_sq:
-                col = mix(col, CHECK, 0.7)
-            if s == hover_sq:
-                col = mix(col, HOVER, 0.18)
-            sq_arr[s] = (f - 3.5, -0.06, 3.5 - r, 1.0, 0.12, 1.0, *col, 0.9)
-        batch.add_array(sq_arr)
-
-        # marcadores de lances possíveis
-        for s, m in targets.items():
-            x, z = cr.file_of(s) - 3.5, 3.5 - cr.rank_of(s)
-            if g.pos.board[s] or m.en_passant:
-                for dx in (-0.4, 0.4):
-                    for dz in (-0.4, 0.4):
-                        batch.cube((x + dx, 0.03, z + dz), (0.14, 0.06, 0.14), CAPTURE_MARK, 2.0)
-            else:
-                pulse = 0.16 + 0.03 * math.sin(self.time * 6)
-                batch.cube((x, 0.03, z), (pulse, 0.06, pulse), MOVE_DOT, 2.0)
-
-        # marcador de hover nas bandejas / modo livre
-        if self.hover and (self.mode == "livre" or self.hover[0] not in range(8)):
-            c = cell_center(self.hover)
-            col = SEL if self.held else HOVER
-            for dx, dz, sx, sz in ((0, -0.48, 1.0, 0.05), (0, 0.48, 1.0, 0.05),
-                                   (-0.48, 0, 0.05, 1.0), (0.48, 0, 0.05, 1.0)):
-                batch.cube((c[0] + dx, c[1] + 0.02, c[2] + dz), (sx, 0.04, sz), col, 2.0)
-
-        # peças
-        for cell, piece in self.layout().items():
-            pos = cell_center(cell)
+            sel_cell = (cr.file_of(self.selected), cr.rank_of(self.selected))
+        for cell, piece in sorted(self.layout().items(), key=lambda kv: self.cell_xy(kv[0])[1]):
+            cx, cy = self.cell_center(cell)
+            lift, sx, sy = 0.0, 1.0, 1.0
             if cell in self.anims:
                 src, t0 = self.anims[cell]
-                t = smoothstep((self.time - t0) / ANIM_TIME)
-                if src is None:   # peça largada no modo livre: pequena queda
-                    pos = pos + np.array([0, (1 - t) * 0.5, 0], dtype=np.float32)
-                else:
-                    a = cell_center(src)
-                    pos = a + (pos - a) * t
-                    pos[1] += arc(t, 0.9)
-            mpos, mcol = self.models[piece]
-            sel = self.mode == "jogo" and self.selected is not None and cell == (
-                cr.file_of(self.selected), cr.rank_of(self.selected))
-            if sel:
-                pos = pos + np.array([0, 0.12 + 0.04 * math.sin(self.time * 5), 0], dtype=np.float32)
-            batch.model(mpos, mcol, pos, voxel=VOX)
+                k = ease_out_back((t - t0) / MOVE_TIME, 1.2)
+                ax, ay = self.cell_center(src)
+                cx, cy = ax + (cx - ax) * k, ay + (cy - ay) * k
+                lift = math.sin(math.pi * min(1.0, (t - t0) / MOVE_TIME)) * 7
+            elif cell in self.lands:
+                k = (t - self.lands[cell]) / LAND_TIME
+                q = math.sin(math.pi * k) * 0.25
+                sx, sy = 1 + q, 1 - q
+            if cell == sel_cell:
+                lift = 3 + math.sin(t * 6) * 1.5
+            elif cell == self.hover and self.mode == "jogo" and piece[0] == g.pos.turn and not g.result:
+                lift = 1.5
+            self._draw_piece(surf, piece, cx, cy, lift, sx, sy, glow=(cell == sel_cell))
 
-        # peça na mão (modo livre)
-        if self.held:
-            piece, _ = self.held
-            target = self.hover
-            if target:
-                pos = cell_center(target) + np.array([0, 0.7 + 0.08 * math.sin(self.time * 4), 0],
-                                                     dtype=np.float32)
-                mpos, mcol = self.models[piece]
-                batch.model(mpos, mcol, pos, voxel=VOX)
-                # "sombra" de destino
-                c = cell_center(target)
-                batch.cube((c[0], c[1] + 0.015, c[2]), (0.8, 0.03, 0.8), (0.95, 0.85, 0.35), 2.0)
+        if self.mode == "jogo" and self.selected is not None:
+            for m in g.moves_from(self.selected):
+                c = (cr.file_of(m.to), cr.rank_of(m.to))
+                if g.pos.board[m.to] or m.en_passant:
+                    x0, y0 = self.cell_xy(c)
+                    for dx, dy in ((0, 0), (SQ - 4, 0), (0, SQ - 4), (SQ - 4, SQ - 4)):
+                        pygame.draw.rect(surf, CHECK, (x0 + dx, y0 + dy, 4, 4))
+                        pygame.draw.rect(surf, OUTLINE, (x0 + dx, y0 + dy, 4, 4), 1)
+                else:
+                    x, y = self.cell_center(c)
+                    r = 2 + (1 if int(t * 5) % 2 else 0)
+                    pygame.draw.rect(surf, OUTLINE, (int(x) - r - 1, int(y) - r - 1, 2 * r + 2, 2 * r + 2))
+                    pygame.draw.rect(surf, MOVE, (int(x) - r, int(y) - r, 2 * r, 2 * r))
+        self.particles.draw(surf)
+
+    def _draw_piece(self, surf, piece, cx, cy, lift=0.0, sx=1.0, sy=1.0, glow=False):
+        spr = self.sprites[piece]
+        w, h = spr.get_size()
+        if sx != 1.0 or sy != 1.0:
+            spr = pygame.transform.scale(spr, (max(1, round(w * sx)), max(1, round(h * sy))))
+        sw, sh = spr.get_size()
+        base_y = cy + SQ / 2 - 1
+        shw = max(4, int(12 - lift * 0.6))
+        _tint(surf, (round(cx - shw / 2), round(base_y - 2), shw, 3), (20, 10, 20), 110)
+        x = round(cx - sw / 2)
+        y = round(base_y - sh - lift)
+        if glow:
+            gl = self.glow[piece]
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                surf.blit(gl, (x + dx, y + dy))
+        surf.blit(spr, (x, y))
 
     # ------------------------------------------------------------ HUD
     def result_text(self):
@@ -448,54 +499,49 @@ class ChessScene:
         if not g.result:
             return ""
         if g.result == "1-0":
-            return f"{g.reason}! Brancas vencem (1-0)"
+            return f"{g.reason}: Brancas vencem"
         if g.result == "0-1":
-            return f"{g.reason}! Pretas vencem (0-1)"
-        return f"Empate: {g.reason} (½-½)"
+            return f"{g.reason}: Pretas vencem"
+        return f"Empate: {g.reason}"
 
     def hud(self):
         g = self.game
-        lines = []
-        mode = "MODO JOGO" if self.mode == "jogo" else "MODO LIVRE"
-        title = f"XADREZ  ·  {mode}"
+        d = {"title": "XADREZ", "mode": "Modo Jogo" if self.mode == "jogo" else "Modo Livre",
+             "accent": (254, 95, 85), "lines": [], "icons": None,
+             "tally": ("PARTIDAS", f"{self.tally['w']:g}", f"{self.tally['b']:g}")}
         if self.mode == "jogo":
-            if g.result:
-                lines.append((self.result_text(), (255, 220, 120)))
-            else:
-                turn = COLOR_PT[g.pos.turn]
-                extra = "  —  XEQUE!" if g.pos.in_check() else ""
-                lines.append((f"Vez das {turn}{extra}", (255, 255, 255)))
             sc = g.score()
+            d["scores"] = [("BRANCAS", sc["w"], (0, 147, 255)), ("PRETAS", sc["b"], (254, 76, 64))]
+            if g.result:
+                win = {"1-0": "Brancas vencem!", "0-1": "Pretas vencem!"}.get(g.result, "Empate!")
+                d["status"] = (win, (255, 214, 90))
+                d["lines"].append((g.reason, (255, 214, 90)))
+            elif g.pos.in_check():
+                d["status"] = (f"Vez das {COLOR_PT[g.pos.turn]}: XEQUE!", (255, 120, 110))
+            else:
+                d["status"] = (f"Vez das {COLOR_PT[g.pos.turn]}", (255, 255, 255))
             diff = sc["diff"]
-            adv = "igual" if diff == 0 else (f"Brancas +{diff}" if diff > 0 else f"Pretas +{-diff}")
-            lines.append((f"Material  Brancas {sc['w']}  ·  Pretas {sc['b']}   ({adv})", (210, 230, 255)))
-            cw = sum(cr.PIECE_VALUES[p[1]] for p in g.captured_by("w"))
-            cb = sum(cr.PIECE_VALUES[p[1]] for p in g.captured_by("b"))
-            lines.append((f"Capturas  Brancas {cw} pts  ·  Pretas {cb} pts", (200, 200, 220)))
-            lines.append((f"Placar de partidas  Brancas {self.tally['w']:g}  x  {self.tally['b']:g} Pretas",
-                          (255, 200, 140)))
-            ml = g.move_list()
-            if ml:
-                lines.append(("Lances: " + "  ".join(ml[-3:]), (180, 180, 200)))
-            hints = ["Clique: selecionar/mover", "G: desistir", "Z: desfazer", "R: nova partida",
-                     "M: modo livre"]
+            d["lines"].append(("Vantagem: " + ("igual" if diff == 0 else
+                               (f"Brancas +{diff}" if diff > 0 else f"Pretas +{-diff}")), (200, 210, 230)))
+            d["icons"] = (g.captured_by("w"), g.captured_by("b"))
+            for line in g.move_list()[-3:]:
+                d["lines"].append((line, (170, 176, 200)))
             if self.pending_promo:
-                lines.append(("PROMOÇÃO: 1 Dama  2 Torre  3 Bispo  4 Cavalo  (Esc cancela)", (255, 240, 120)))
+                d["lines"].append(("PROMOÇÃO: 1 D  2 T  3 B  4 C", (255, 230, 120)))
+            d["hints"] = [("Clique", "mover"), ("G", "desistir"), ("Z", "desfazer"), ("R", "nova"),
+                          ("M", "livre")]
         else:
             pos = self.free_position()
-            w, b = pos.material("w"), pos.material("b")
-            d = w - b
-            adv = "igual" if d == 0 else (f"Brancas +{d}" if d > 0 else f"Pretas +{-d}")
-            lines.append((f"Material no tabuleiro  Brancas {w}  ·  Pretas {b}   ({adv})", (210, 230, 255)))
-            if self.held:
-                p = self.held[0]
-                lines.append((f"Na mão: {cr.PIECE_NAMES_PT[p[1]]} ({COLOR_PT[p[0]]})", (255, 230, 150)))
+            d["scores"] = [("BRANCAS", pos.material("w"), (0, 147, 255)),
+                           ("PRETAS", pos.material("b"), (254, 76, 64))]
+            d["status"] = ("Monte a posição que quiser", (255, 255, 255))
             err = cr.validate_position(pos)
             if err:
-                lines.append(("Para jogar: " + err, (230, 170, 170)))
+                d["lines"].append((err, (240, 160, 160)))
             else:
-                lines.append(("Posição válida - Enter inicia partida (Shift+Enter: pretas começam)",
-                              (170, 230, 170)))
-            hints = ["Clique: pegar/soltar", "1-6: nova peça (Shift = preta)", "C: trocar cor",
-                     "Del: descartar", "X: esvaziar", "R: posição inicial", "M: modo jogo"]
-        return title, lines, hints
+                d["lines"].append(("Enter: jogar desta posição", (150, 240, 170)))
+                d["lines"].append(("Shift+Enter: pretas começam", (150, 200, 170)))
+            d["hints"] = [("Clique", "pegar/soltar"), ("1-6", "peça"), ("Shift", "preta"),
+                          ("C", "cor"), ("Del", "apagar"), ("X", "esvaziar"), ("R", "inicial"),
+                          ("M", "jogo")]
+        return d

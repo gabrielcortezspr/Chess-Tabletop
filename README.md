@@ -1,29 +1,44 @@
-# Tabletop Voxel: Xadrez & Go
+# Tabletop: Xadrez & Go
 
-Uma mesa 3D em Python com **tabuleiro de xadrez** e **goban (Go)**, com gráficos
-**voxel pixelados** no estilo de jogo retrô. A câmera gira livremente ao redor da
-mesa, mas o foco fica sempre no tabuleiro.
+Uma mesa de **xadrez** e **Go (goban)** em Python, em **pixel art 2D com efeitos de
+shader** no estilo de jogos de cartas como Balatro: o tabuleiro é uma "carta" plana
+que inclina em pseudo-3D, sobre um fundo de tinta girando, com tela de monitor CRT.
 
+**Efeitos**
+- Fundo animado de tinta em redemoinho (shader), com cores próprias de cada jogo.
+- Tabuleiro com inclinação pseudo-3D (perspectiva) que acompanha o mouse, sombra
+  projetada, espessura e um brilho tipo *foil* que passa de tempos em tempos.
+- Tela CRT: curvatura, scanlines, aberração cromática, brilho, vinheta e granulado.
+- Juice: peças com quique ao andar e ao pousar, capturas que explodem em pixels,
+  tremida de tela, números "+3" saltando, placar que pula quando muda, faixas
+  "XEQUE!" / "XEQUE-MATE!" com letras ondulando, confete, e o tabuleiro vira como
+  uma carta ao trocar de jogo ou de lado.
+
+**Modos**
 - **Modo Jogo**: regras oficiais (xeque, roque, en passant, promoção, mate,
   afogamento, repetição tripla, regra dos 50 lances, material insuficiente; no Go:
   capturas, ko/superko, proibição de suicídio, passes e contagem).
 - **Modo Livre**: use o tabuleiro como um tabuleiro de verdade: pegue qualquer
-  peça, coloque onde quiser (inclusive nas bandejas ao lado), crie peças novas,
-  coloque e tire pedras de Go sem regras. Depois, **Enter** começa uma partida a
-  partir da posição montada.
-- **Pontuação automática**:
-  - Xadrez: material de cada lado (P=1, C=3, B=3, T=5, D=9), pontos capturados,
-    resultado detectado sozinho e **placar de partidas** (vitória = 1, empate = ½).
-  - Go: capturas, **estimativa ao vivo** do placar, e ao fim (dois passes) a
-    contagem por **área (chinesa)** e por **território (japonesa)** com komi.
-    As pedras mortas são sugeridas automaticamente e você ajusta com cliques.
+  peça (ela balança na mão como uma carta arrastada), coloque onde quiser, inclusive
+  nas bandejas ao lado, crie peças novas, ponha e tire pedras de Go sem regras.
+  Depois, **Enter** começa uma partida a partir da posição montada.
+
+**Pontuação automática**
+- Xadrez: material de cada lado (P=1, C=3, B=3, T=5, D=9), vantagem, peças
+  capturadas, resultado detectado sozinho e **placar de partidas** (vitória = 1,
+  empate = ½).
+- Go: capturas, **estimativa ao vivo** e, ao fim (dois passes), contagem por
+  **área (chinesa)** e por **território (japonesa)** com komi. As pedras mortas são
+  sugeridas automaticamente e você ajusta com cliques.
 
 ![Xadrez](docs/xadrez.png)
-![Go - contagem](docs/go.png)
+![Xeque-mate](docs/xeque-mate.png)
+![Go](docs/go.png)
+![Go - contagem](docs/go-contagem.png)
 
 ## Instalação
 
-Requer Python 3.9+ e uma placa de vídeo com OpenGL 3.3.
+Requer Python 3.9+ e suporte a OpenGL 3.3.
 
 ```bash
 python -m venv .venv
@@ -31,28 +46,27 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py                   # começa no xadrez
 python main.py --jogo go         # começa no Go
-python main.py --pixel 4         # pixels maiores (1 = sem pixelização)
 ```
 
 ## Controles
 
-### Câmera
+### Visão
 | Ação | Comando |
 |---|---|
-| Girar ao redor do tabuleiro | botão direito + arrastar, `Q`/`E`, setas |
-| Deslocar (sempre perto do tabuleiro) | botão do meio + arrastar, `Shift` + botão direito, `W A S D` |
-| Zoom | roda do mouse, `PgUp`/`PgDn` |
-| Ver do outro lado da mesa | `F` |
+| Inclinar o tabuleiro | botão direito + arrastar |
+| Deslocar | botão do meio + arrastar, ou `Shift` + botão direito |
+| Zoom | roda do mouse |
+| Virar o tabuleiro (ver do lado das pretas) | `F` |
 | Visão padrão | `Espaço` |
 
 ### Geral
 | Ação | Tecla |
 |---|---|
-| Alternar Xadrez / Go | `Tab` |
+| Alternar Xadrez / Go | `Tab` (ou clique nas abas no topo) |
 | Alternar Modo Jogo / Modo Livre | `M` |
 | Desfazer | `Z` |
 | Nova partida / reiniciar | `R` |
-| Tamanho do pixel | `[` e `]` |
+| Ligar/desligar efeito CRT | `F2` |
 | Screenshot (pasta `screenshots/`) | `F12` |
 | Ajuda na tela | `H` |
 | Sair | `Ctrl+Q` ou fechar a janela |
@@ -84,21 +98,23 @@ python main.py --pixel 4         # pixels maiores (1 = sem pixelização)
 ```
 main.py                  ponto de entrada
 tabletop/
-  app.py                 janela pygame + OpenGL, entrada, HUD
-  renderer.py            renderizador moderngl: cubos instanciados, sombra,
-                         render em baixa resolução + dithering (visual pixelado)
-  camera.py              câmera orbital com foco preso ao tabuleiro + picking
-  voxels.py              peças de xadrez, pedras e potes gerados em voxels
+  app.py                 janela, entrada, inclinação do tabuleiro, HUD lateral
+  gfx.py                 shaders: fundo em redemoinho, tabuleiro em perspectiva,
+                         pós-processamento CRT; mapeamento mouse -> tabuleiro
+  pixelart.py            sprites das peças/pedras gerados por código + fonte 3x5
+  fx.py                  partículas, textos saltando, tremida, easing
   chess_rules.py         regras completas de xadrez (sem dependências)
   go_rules.py            regras de Go, contagem e sugestão de pedras mortas
-  chess_scene.py         cena do xadrez (modos Jogo/Livre, animações, placar)
-  go_scene.py            cena do Go (modos Jogo/Livre, contagem, placar)
+  chess_scene.py         mesa de xadrez (modos Jogo/Livre, animações, placar)
+  go_scene.py            mesa de Go (modos Jogo/Livre, contagem, placar)
 tests/                   testes das regras (perft do xadrez, capturas/ko/contagem do Go)
 ```
 
-O visual pixelado vem de renderizar a cena num framebuffer pequeno
-(janela ÷ tamanho do pixel) e ampliá-lo sem suavização, com paleta reduzida e
-dithering ordenado. Tudo na cena é feito de cubos.
+Tudo é 2D: o tabuleiro é desenhado em pixel art numa textura pequena, que vira
+um quadrilátero em perspectiva (a "carta"). A cena inteira é composta num canvas
+de 360 px de altura e ampliada sem suavização, passando pelo shader de CRT. Para
+clicar, a posição do mouse desfaz a curvatura do CRT e a perspectiva (homografia)
+até chegar à casa do tabuleiro.
 
 ## Testes
 
