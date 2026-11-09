@@ -9,6 +9,7 @@ from . import go_rules as gr
 from .fx import ease_out_back
 from .pixelart import OUTLINE, draw_tiny, stone_sprite, tiny_width
 from .scene_base import SceneBase
+from .storage import copy_text, load_positions, paste_text, save_position
 
 CELL = {9: 18, 13: 12, 19: 8}
 MARGIN = {9: 14, 13: 12, 19: 11}
@@ -29,6 +30,8 @@ class GoScene(SceneBase):
         super().__init__()
         self.game = gr.GoGame(size)
         self.free_color = gr.BLACK
+        self.free_board = gr.GoBoard(size)
+        self.saved_index = -1
         self.flipped = False
         self.drop = None
         self.show_terr = False
@@ -116,11 +119,17 @@ class GoScene(SceneBase):
         return [(x, y) for x in c for y in c]
 
     # ------------------------------------------------------------ estado
+    def board(self):
+        """Tabuleiro exibido: o da partida ou o de criação livre."""
+        return self.free_board if self.mode == "livre" else self.game.board
+
     def estimate(self):
-        key = (self.game.board.key(), self.game.komi)
+        b = self.board()
+        komi = self.game.komi + (self.game.handicap if self.mode == "jogo" else 0)
+        key = (b.key(), komi)
         if key != self._est_key:
             self._est_key = key
-            self._est = self.game.estimate()
+            self._est = gr.estimate_board(b, komi)
         return self._est
 
     def hover_legal(self):
@@ -145,17 +154,28 @@ class GoScene(SceneBase):
 
     # ------------------------------------------------------------ comandos
     def toggle_mode(self):
-        self.mode = "livre" if self.mode == "jogo" else "jogo"
-        self.toast("Modo livre: sem regras" if self.mode == "livre" else "Modo jogo: regras oficiais")
+        if self.mode == "jogo":
+            self.mode = "livre"
+            self.free_board = self.game.board.copy()   # cópia: a partida fica intacta
+            self.toast("Modo livre: monte qualquer posição")
+        else:
+            self.mode = "jogo"
+            self.toast("Modo jogo: a partida continua de onde parou")
 
-    def reset(self):
+    def reset(self, standard=False):
         if self.mode == "livre":
-            self.game.board = gr.GoBoard(self.game.size)
+            self.free_board = gr.GoBoard(self.game.size)
             self.toast("Goban limpo")
         else:
-            self.game.reset()
+            board, turn, ha = self.game.start
+            if standard or not any(board.get(x, y) for y in range(board.size) for x in range(board.size)):
+                self.game.reset()
+                self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
+            else:
+                self.game.reset(board=board, turn=turn, handicap=ha)
+                self.emit("banner", "DE NOVO!", (255, 214, 90))
+                self.toast("Recomeçou da posição inicial (Shift+R: goban vazio)")
             self.counted = None
-            self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
         self.drop = None
         self.emit("sheen")
 
@@ -165,11 +185,94 @@ class GoScene(SceneBase):
         if self.game.undo():
             self._sync_tally()
             self.drop = None
-            self.toast("Jogada desfeita")
+            self.toast("Jogada desfeita (Y refaz)")
+
+    def redo(self):
+        if self.mode == "livre":
+            return
+        action = self.game.redo()
+        if action and action[0] == "play":
+            self.drop = (action[1], action[2], self.time)
+        elif action is None:
+            self.toast("Nada para refazer")
+        if self.game.phase == "scoring":
+            self.emit("banner", "CONTAGEM!", (255, 214, 90))
+
+    def start_from_free(self, turn):
+        board = self.free_board.copy()
+        removed = 0
+        for _c, stones, libs in board.all_groups():
+            if not libs:
+                removed += len(stones)
+                for sx, sy in stones:
+                    board.set(sx, sy, gr.EMPTY)
+        komi = self.game.komi
+        self.game.reset(board=board, turn=turn)
+        self.game.komi = komi
+        self.counted = None
+        self.mode = "jogo"
+        self.emit("banner", "VALENDO!", (255, 214, 90))
+        extra = f" ({removed} pedra(s) sem liberdade removida(s))" if removed else ""
+        self.toast(f"Vez das {NAME[turn]}{extra}")
+
+    # ------------------------------------------------------------ treino
+    def export_text(self):
+        if self.mode == "livre":
+            tmp = gr.GoGame(self.game.size, self.game.komi)
+            tmp.reset(board=self.free_board, turn=self.free_color)
+            return gr.to_sgf(tmp)
+        return gr.to_sgf(self.game)
+
+    def load_text(self, text):
+        try:
+            game = gr.from_sgf(text)
+        except ValueError as e:
+            self.toast(str(e))
+            self.emit("shake", 3)
+            return False
+        n_moves = len(game.actions)
+        game.rewind()
+        self.game = game
+        self._setup()
+        self.counted = None
+        self.drop = None
+        self.mode = "jogo"
+        self.emit("sheen")
+        self.emit("banner", "SGF CARREGADO", (255, 214, 90))
+        self.toast(f"{n_moves} jogada(s): Y avança, Z volta" if n_moves else "Posição carregada")
+        return True
+
+    def training_key(self, key, mod):
+        if not mod & pygame.KMOD_CTRL:
+            return False
+        if key == pygame.K_c:
+            ok = copy_text(self.export_text())
+            self.toast("SGF copiado" if ok else "SGF salvo em posicoes/copiado.txt")
+        elif key == pygame.K_v:
+            text = paste_text()
+            if not text:
+                self.toast("Área de transferência vazia (ou use posicoes/colar.txt)")
+            else:
+                self.load_text(text)
+        elif key == pygame.K_s:
+            total = save_position("go", self.export_text())
+            self.toast(f"Posição salva ({total} em posicoes/go.txt)")
+        elif key == pygame.K_l:
+            items = load_positions("go")
+            if not items:
+                self.toast("Nenhuma posição salva ainda (Ctrl+S salva)")
+            else:
+                self.saved_index = (self.saved_index + 1) % len(items)
+                if self.load_text(items[self.saved_index]):
+                    self.toast(f"Posição salva {self.saved_index + 1}/{len(items)}")
+        else:
+            return False
+        return True
 
     def set_size(self, n):
         self.game.size = n
         self.game.reset(n)
+        self.free_board = gr.GoBoard(n)
         self.counted = None
         self.drop = None
         self._setup()
@@ -183,11 +286,12 @@ class GoScene(SceneBase):
         g = self.game
         x, y = pt
         if self.mode == "livre":
-            if g.board.get(x, y) != gr.EMPTY:
-                self._burst(x, y, g.board.get(x, y), 30)
-                g.board.set(x, y, gr.EMPTY)
+            fb = self.free_board
+            if fb.get(x, y) != gr.EMPTY:
+                self._burst(x, y, fb.get(x, y), 30)
+                fb.set(x, y, gr.EMPTY)
             else:
-                g.board.set(x, y, gr.opp(self.free_color) if shift else self.free_color)
+                fb.set(x, y, gr.opp(self.free_color) if shift else self.free_color)
                 self.drop = (x, y, self.time)
             return
         if g.phase == "scoring":
@@ -221,6 +325,25 @@ class GoScene(SceneBase):
     def key(self, key, mod):
         g = self.game
         shift = bool(mod & pygame.KMOD_SHIFT)
+        if self.training_key(key, mod):
+            return True
+        if key == pygame.K_r:
+            self.reset(standard=shift)
+            return True
+        if key == pygame.K_y:
+            self.redo()
+            return True
+        if key == pygame.K_d and self.mode == "jogo":
+            cur = g.handicap
+            nxt = {0: 2}.get(cur, cur + 1 if cur < 9 else 0)
+            if g.set_handicap(nxt):
+                self.counted = None
+                self.drop = None
+                self.emit("sheen")
+                self.toast(f"Handicap {nxt} (komi 0.5, brancas começam)" if nxt else "Sem handicap")
+            else:
+                self.toast("Handicap só antes da primeira jogada (R recomeça)")
+            return True
         if key == pygame.K_b:
             self.set_size(SIZES[(SIZES.index(g.size) + 1) % len(SIZES)] if g.size in SIZES else 19)
             return True
@@ -243,17 +366,7 @@ class GoScene(SceneBase):
                 self.free_color = gr.opp(self.free_color)
                 return True
             if key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                board = g.board.copy()
-                turn = gr.opp(self.free_color) if shift else self.free_color
-                for _c, stones, libs in board.all_groups():
-                    if not libs:
-                        for sx, sy in stones:
-                            board.set(sx, sy, gr.EMPTY)
-                g.reset(board=board, turn=turn)
-                self.counted = None
-                self.mode = "jogo"
-                self.emit("banner", "VALENDO!", (255, 214, 90))
-                self.toast(f"Vez das {NAME[turn]}")
+                self.start_from_free(gr.opp(self.free_color) if shift else self.free_color)
                 return True
             return False
         if key == pygame.K_p and g.phase == "play":
@@ -296,19 +409,21 @@ class GoScene(SceneBase):
         surf.blit(self._static_surface(), (0, 0))
         g, t = self.game, self.time
         n = g.size
-        dead = g.dead if g.phase in ("scoring", "over") else set()
+        board = self.board()
+        livre = self.mode == "livre"
+        dead = g.dead if g.phase in ("scoring", "over") and not livre else set()
 
         terr = None
-        if g.phase in ("scoring", "over"):
+        if g.phase in ("scoring", "over") and not livre:
             terr = dict(g.area_score()["terr_map"])
             for (x, y) in dead:
-                terr[(x, y)] = gr.opp(g.board.get(x, y))
-        elif self.show_terr or self.mode == "livre":
-            terr = self.estimate()["terr_map"] if self.show_terr else None
+                terr[(x, y)] = gr.opp(board.get(x, y))
+        elif self.show_terr:
+            terr = self.estimate()["terr_map"]
 
         for y in range(n):
             for x in range(n):
-                c = g.board.get(x, y)
+                c = board.get(x, y)
                 if c == gr.EMPTY:
                     continue
                 px, py = self.point_xy(x, y)
@@ -343,7 +458,7 @@ class GoScene(SceneBase):
 
         if self.mode == "jogo" and isinstance(g.last_move, tuple):
             x, y = g.last_move
-            if g.board.get(x, y) != gr.EMPTY:
+            if board.get(x, y) != gr.EMPTY:
                 px, py = self.point_xy(x, y)
                 r = max(1, self.cell // 6)
                 pygame.draw.rect(surf, (255, 70, 70), (px - r, py - r, 2 * r, 2 * r))
@@ -352,7 +467,7 @@ class GoScene(SceneBase):
             x, y = self.hover
             px, py = self.point_xy(x, y)
             h = self.cell // 2
-            ok = (self.mode == "livre" and g.board.get(x, y) == gr.EMPTY) or \
+            ok = (self.mode == "livre" and board.get(x, y) == gr.EMPTY) or \
                  (self.mode == "jogo" and g.phase == "play" and self.hover_legal())
             if ok:
                 c = self.free_color if self.mode == "livre" else g.turn
@@ -393,9 +508,11 @@ class GoScene(SceneBase):
             d["status"] = (f"Vez das {NAME[g.turn]}{last}", (255, 255, 255))
             diff = est["black"] - est["white"]
             lead = "empate" if diff == 0 else (f"Pretas +{diff:g}" if diff > 0 else f"Brancas +{-diff:g}")
-            d["lines"] += [(f"Estimativa: {lead} (komi {g.komi:g})", (200, 210, 230)), cap]
-            d["hints"] = [("Clique", "jogar"), ("P", "passar"), ("G", "desistir"), ("Z", "desfazer"),
-                          ("T", "território"), ("K", "komi"), ("B", "tamanho"), ("R", "nova"), ("M", "livre")]
+            ha = f", handicap {g.handicap}" if g.handicap else ""
+            d["lines"] += [(f"Estimativa: {lead} (komi {g.komi:g}{ha})", (200, 210, 230)), cap]
+            d["hints"] = [("Clique", "jogar"), ("P", "passar"), ("Z", "volta"), ("Y", "avança"),
+                          ("D", "handicap"), ("K", "komi"), ("B", "tamanho"), ("T", "território"),
+                          ("G", "desistir"), ("R", "recomeça"), ("M", "livre")]
         elif g.phase == "scoring":
             s = g.area_score()
             d["scores"] = [("PRETAS", s["black"], (60, 60, 80)), ("BRANCAS", s["white"], (230, 226, 210))]

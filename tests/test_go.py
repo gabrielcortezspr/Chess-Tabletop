@@ -103,3 +103,68 @@ def test_invader_dead_in_corner():
         b.set(i, 5, gr.BLACK)
     dead = gr.estimate_dead(b)
     assert dead == {(1, 1)}
+
+
+# ---------------------------------------------------------------- auditoria e treino
+
+def test_handicap():
+    g = gr.GoGame(19)
+    assert g.set_handicap(4)
+    assert g.turn == gr.WHITE and g.komi == 0.5 and g.handicap == 4
+    assert g.board.count(gr.BLACK) == 4
+    assert gr.handicap_points(19, 9).count((9, 9)) == 1
+    put(g, [(10, 10)])
+    assert not g.set_handicap(2)        # só antes da primeira jogada
+
+
+def test_handicap_compensation_in_area_score():
+    g = gr.GoGame(9, komi=0.5)
+    g.set_handicap(2)
+    s = g.area_score()
+    assert s["white"] == 0.5 + 2
+
+
+def test_go_undo_redo():
+    g = gr.GoGame(9)
+    put(g, [(4, 4), (3, 3)])
+    g.pass_turn()
+    g.rewind()
+    assert g.board.count(gr.BLACK) == 0 and len(g.redo_stack) == 3
+    assert g.redo() == ("play", 4, 4)
+    put(g, [(0, 0)])
+    assert g.redo_stack == []
+
+
+def test_sgf_roundtrip_and_variations():
+    g = gr.GoGame(9, komi=5.5)
+    put(g, [(4, 4), (3, 3), (5, 5)])
+    g.pass_turn()
+    text = gr.to_sgf(g)
+    g2 = gr.from_sgf(text)
+    assert g2.board.key() == g.board.key() and g2.komi == 5.5 and g2.turn == g.turn
+    sgf = "(;GM[1]SZ[9]AB[aa][bb]AW[cc]PL[W];W[dd](;B[ee];W[ff])(;B[gg]))"
+    g3 = gr.from_sgf(sgf)
+    assert g3.board.get(4, 4) == gr.BLACK         # ee = x4, linha 4 de cima
+    assert g3.board.get(6, 2) == gr.EMPTY         # gg está numa variação, ignorada
+    assert g3.board.get(0, 8) == gr.BLACK         # aa = canto superior esquerdo
+
+
+def test_sgf_compressed_and_errors():
+    g = gr.from_sgf("(;SZ[9]AB[aa:bb])")
+    assert g.board.count(gr.BLACK) == 4
+    import pytest
+    with pytest.raises(ValueError):
+        gr.from_sgf("(;SZ[9];B[aa];W[aa])")      # ponto ocupado
+    with pytest.raises(ValueError):
+        gr.from_sgf("isso não é sgf")
+
+
+def test_neutral_points_are_not_territory():
+    # coluna 4 vazia entre muros preto (3) e branco (5): pontos neutros (dame)
+    g = gr.GoGame(9, komi=0)
+    for y in range(9):
+        g.board.set(3, y, gr.BLACK)
+        g.board.set(5, y, gr.WHITE)
+    s = g.area_score(set())
+    assert all((4, y) not in s["terr_map"] for y in range(9))
+    assert s["black"] == 36 and s["white"] == 36

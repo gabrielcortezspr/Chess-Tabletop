@@ -11,6 +11,7 @@ WHITE, BLACK = "w", "b"
 PIECE_VALUES = {"P": 1, "N": 3, "B": 3, "R": 5, "Q": 9, "K": 0}
 PIECE_NAMES_PT = {"P": "Peão", "N": "Cavalo", "B": "Bispo", "R": "Torre", "Q": "Dama", "K": "Rei"}
 SAN_LETTER = {"N": "C", "B": "B", "R": "T", "Q": "D", "K": "R", "P": ""}  # notação em português
+SAN_LETTER_EN = {"N": "N", "B": "B", "R": "R", "Q": "Q", "K": "K", "P": ""}  # notação internacional (PGN)
 
 KNIGHT_D = [(1, 2), (2, 1), (2, -1), (1, -2), (-1, -2), (-2, -1), (-2, 1), (-1, 2)]
 KING_D = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
@@ -281,23 +282,40 @@ class Position:
 
     @classmethod
     def from_fen(cls, fen: str) -> "Position":
+        """Lê uma FEN. Lança ValueError se o texto não for uma FEN válida."""
         parts = fen.split()
+        if not parts:
+            raise ValueError("FEN vazia")
+        rows = parts[0].split("/")
+        if len(rows) != 8:
+            raise ValueError("FEN precisa de 8 fileiras")
         board = [None] * 64
-        for i, row in enumerate(parts[0].split("/")):
+        for i, row in enumerate(rows):
             r, f = 7 - i, 0
             for ch in row:
                 if ch.isdigit():
                     f += int(ch)
-                else:
+                elif ch.upper() in "PNBRQK":
+                    if f > 7:
+                        raise ValueError("fileira longa demais na FEN")
                     board[sq(f, r)] = (WHITE if ch.isupper() else BLACK, ch.upper())
                     f += 1
+                else:
+                    raise ValueError(f"caractere inválido na FEN: {ch}")
+            if f != 8:
+                raise ValueError("fileira com tamanho errado na FEN")
         turn = parts[1] if len(parts) > 1 else WHITE
+        if turn not in (WHITE, BLACK):
+            raise ValueError("lado a jogar inválido na FEN")
         cast = frozenset(parts[2]) - {"-"} if len(parts) > 2 else frozenset()
         ep = None
-        if len(parts) > 3 and parts[3] != "-":
-            ep = sq("abcdefgh".index(parts[3][0]), int(parts[3][1]) - 1)
-        half = int(parts[4]) if len(parts) > 4 else 0
-        full = int(parts[5]) if len(parts) > 5 else 1
+        try:
+            if len(parts) > 3 and parts[3] != "-":
+                ep = sq("abcdefgh".index(parts[3][0]), int(parts[3][1]) - 1)
+            half = int(parts[4]) if len(parts) > 4 else 0
+            full = int(parts[5]) if len(parts) > 5 else 1
+        except (ValueError, IndexError) as e:
+            raise ValueError("FEN inválida") from e
         return cls(board, turn, frozenset(cast), ep, half, full)
 
 
@@ -344,6 +362,7 @@ class ChessGame:
         self.pos = (position or Position()).copy()
         self.start = self.pos.copy()
         self.history: list = []   # (pos_antes, move, san, capturada)
+        self.redo_stack: list = []  # lances desfeitos que podem ser refeitos
         self.rep_counts: dict = {}
         self._count_rep()
         self._legal_cache = None
@@ -382,7 +401,7 @@ class ChessGame:
     def needs_promotion(self, frm: int, to: int) -> bool:
         return any(m.frm == frm and m.to == to and m.promo for m in self.legal_moves())
 
-    def san(self, m: Move) -> str:
+    def san(self, m: Move, letters=SAN_LETTER) -> str:
         pos = self.pos
         piece = pos.board[m.frm]
         if m.castle:
@@ -392,9 +411,9 @@ class ChessGame:
             if piece[1] == "P":
                 s = ("abcdefgh"[file_of(m.frm)] + "x" if capture else "") + sq_name(m.to)
                 if m.promo:
-                    s += "=" + SAN_LETTER[m.promo]
+                    s += "=" + letters[m.promo]
             else:
-                s = SAN_LETTER[piece[1]]
+                s = letters[piece[1]]
                 others = [o for o in self.legal_moves() if o.to == m.to and o.frm != m.frm
                           and pos.board[o.frm] == piece]
                 if others:
@@ -410,9 +429,11 @@ class ChessGame:
             s += "#" if not nxt.legal_moves() else "+"
         return s
 
-    def push(self, m: Move):
+    def push(self, m: Move, keep_redo: bool = False):
         if self.result:
             return None
+        if not keep_redo:
+            self.redo_stack.clear()
         captured = self.pos.board[m.to]
         if m.en_passant:
             captured = (other(self.pos.turn), "P")
@@ -433,12 +454,67 @@ class ChessGame:
             return False
         k = self.pos.repetition_key()
         self.rep_counts[k] -= 1
-        prev, _, _, _ = self.history.pop()
+        prev, move, _, _ = self.history.pop()
+        self.redo_stack.append(move)
         self.pos = prev
         self._legal_cache = None
         self.result, self.reason = None, ""
         self._update_result()
         return True
+
+    def redo(self):
+        """Refaz o último lance desfeito. Retorna o lance ou None."""
+        if not self.redo_stack or self.result:
+            return None
+        m = self.redo_stack[-1]
+        if m not in self.legal_moves():
+            self.redo_stack.clear()
+            return None
+        self.redo_stack.pop()
+        self.push(m, keep_redo=True)
+        return m
+
+    def rewind(self):
+        """Volta ao início guardando todos os lances para refazer."""
+        while self.history:
+            self.undo()
+
+    # ------------------------------------------------------------ PGN
+    def match_san(self, token: str):
+        """Encontra o lance legal correspondente a um SAN (internacional ou em português)."""
+        def norm(t):
+            t = t.replace("0", "O").rstrip("+#!?").replace("=", "")
+            return t.replace("e.p.", "").strip()
+        tok = norm(token)
+        for letters in (SAN_LETTER_EN, SAN_LETTER):   # internacional tem prioridade ("R" = torre)
+            for m in self.legal_moves():
+                if norm(self.san(m, letters)) == tok:
+                    return m
+        # forma longa/UCI (e2e4, e7e8q)
+        t = token.strip().lower()
+        if len(t) in (4, 5) and t[0] in "abcdefgh" and t[2] in "abcdefgh":
+            try:
+                frm = sq("abcdefgh".index(t[0]), int(t[1]) - 1)
+                to = sq("abcdefgh".index(t[2]), int(t[3]) - 1)
+            except ValueError:
+                return None
+            return self.find_move(frm, to, t[4].upper() if len(t) == 5 else None)
+        return None
+
+    def pgn(self) -> str:
+        start = self.start
+        headers = ['[Event "Tabletop"]']
+        if start.to_fen() != Position().to_fen():
+            headers += ['[SetUp "1"]', f'[FEN "{start.to_fen()}"]']
+        result = self.result or "*"
+        headers.append(f'[Result "{result}"]')
+        moves = []
+        replay = ChessGame(start)
+        for i, (before, m, _san, _c) in enumerate(self.history):
+            num = f"{before.fullmove}." if before.turn == WHITE else (f"{before.fullmove}..." if i == 0 else "")
+            moves.append((num + " " if num else "") + replay.san(m, SAN_LETTER_EN))
+            replay.push(m)
+        return "\n".join(headers) + "\n\n" + " ".join(moves + [result])
 
     def _update_result(self):
         self.result, self.reason = None, ""
@@ -484,3 +560,31 @@ class ChessGame:
     def score(self) -> dict:
         w, b = self.pos.material(WHITE), self.pos.material(BLACK)
         return {"w": w, "b": b, "diff": w - b}
+
+
+def parse_pgn(text: str) -> "ChessGame":
+    """Lê uma partida em PGN (só a linha principal). Lança ValueError com a explicação."""
+    import re
+    fen = None
+    m = re.search(r'\[FEN\s+"([^"]+)"\]', text)
+    if m:
+        fen = m.group(1)
+    body = re.sub(r"\[[^\]]*\]", " ", text)          # cabeçalhos
+    body = re.sub(r"\{[^}]*\}", " ", body)            # comentários
+    body = re.sub(r";[^\n]*", " ", body)
+    while True:                                        # variações (aninhadas)
+        nb = re.sub(r"\([^()]*\)", " ", body)
+        if nb == body:
+            break
+        body = nb
+    body = re.sub(r"\$\d+", " ", body)                 # NAGs
+    body = re.sub(r"\d+\.(\.\.)?", " ", body)           # números de lance
+    game = ChessGame(Position.from_fen(fen) if fen else None)
+    for tok in body.split():
+        if tok in ("1-0", "0-1", "1/2-1/2", "½-½", "*"):
+            break
+        mv = game.match_san(tok)
+        if mv is None:
+            raise ValueError(f"Lance inválido no PGN: {tok}")
+        game.push(mv)
+    return game

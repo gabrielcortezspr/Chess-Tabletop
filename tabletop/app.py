@@ -25,15 +25,18 @@ GOLD = (255, 196, 64)
 
 HELP = [
     ("Botão direito + arrastar", "inclinar o tabuleiro"),
-    ("Meio / Shift+direito", "deslocar"),
-    ("Roda do mouse", "zoom"),
-    ("F", "virar o tabuleiro (ver do outro lado)"),
-    ("Espaço", "visão padrão"),
-    ("Tab", "trocar Xadrez / Go"),
-    ("M", "Modo Jogo / Modo Livre"),
-    ("Z  ·  R", "desfazer  ·  nova partida"),
-    ("F2", "efeito CRT liga/desliga"),
-    ("F12", "screenshot"),
+    ("Meio / Shift+direito", "deslocar  ·  roda: zoom"),
+    ("F  ·  Espaço", "virar o tabuleiro  ·  visão padrão"),
+    ("Tab  ·  M", "trocar Xadrez/Go  ·  Modo Jogo/Livre"),
+    ("Z  ·  Y", "voltar lance  ·  avançar lance"),
+    ("R  ·  Shift+R", "recomeçar da posição montada  ·  do zero"),
+    ("Ctrl+C", "copiar FEN (xadrez) / SGF (go)"),
+    ("Ctrl+Shift+C", "copiar a partida em PGN (xadrez)"),
+    ("Ctrl+V", "colar FEN, PGN ou SGF"),
+    ("Ctrl+S  ·  Ctrl+L", "salvar posição  ·  carregar próxima salva"),
+    ("Enter (modo livre)", "jogar desta posição (Shift: o outro lado)"),
+    ("D  ·  K  ·  B (go)", "handicap  ·  komi  ·  tamanho"),
+    ("F2  ·  F12", "efeito CRT  ·  screenshot"),
     ("H  ·  Ctrl+Q", "ajuda  ·  sair"),
 ]
 
@@ -375,7 +378,7 @@ class App:
             if xx + kw + lw + 4 > x0 + w:
                 xx = x0
                 y += 14
-            if y > ch - 22:
+            if y > ch - 36:
                 break
             pygame.draw.rect(surf, (80, 96, 110), (xx, y, kw, 12), border_radius=3)
             pygame.draw.rect(surf, (230, 230, 240), (xx, y, kw, 11), border_radius=3)

@@ -93,6 +93,48 @@ python main.py --jogo go         # começa no Go
   cor) ou remove uma pedra existente. `R` limpa o goban. `Enter` inicia uma partida
   a partir da posição.
 
+## Treino de posições
+
+Os dois jogos têm um **modo de criação livre** (`M`) separado da partida: o que
+você monta não estraga a partida em andamento, e `M` de novo volta para ela.
+
+| Ação | Tecla |
+|---|---|
+| Começar a jogar da posição montada | `Enter` (com `Shift`, o outro lado começa) |
+| Voltar / avançar lances (navegar pela partida) | `Z` / `Y` |
+| Recomeçar da posição montada | `R` (`Shift+R`: posição padrão / goban vazio) |
+| Copiar posição: FEN (xadrez) ou SGF (Go) | `Ctrl+C` |
+| Copiar a partida inteira em PGN (xadrez) | `Ctrl+Shift+C` |
+| Colar FEN, PGN ou SGF (de sites como Lichess, OGS, etc.) | `Ctrl+V` |
+| Salvar a posição atual na sua coleção | `Ctrl+S` (vai para `posicoes/xadrez.txt` ou `posicoes/go.txt`) |
+| Carregar a próxima posição salva | `Ctrl+L` |
+| Handicap no Go (2 a 9 pedras) | `D`, antes da primeira jogada |
+
+Ao colar um PGN ou SGF, a partida carrega **no começo**: use `Y` para avançar
+lance a lance e `Z` para voltar. Uma FEN incompleta (sem os dois reis, por
+exemplo) abre no modo livre para você terminar de montar. Se a área de
+transferência não funcionar no seu sistema, o texto copiado também fica em
+`posicoes/copiado.txt`, e você pode colar escrevendo em `posicoes/colar.txt`.
+
+## Regras implementadas
+
+**Xadrez**: movimentos de todas as peças, xeque (não dá para deixar o rei em
+xeque), roque grande e pequeno (sem estar em xeque, sem passar por casa atacada,
+direitos perdidos ao mover/perder rei ou torre), en passant (só no lance seguinte,
+inclusive com cravada horizontal), promoção para dama/torre/bispo/cavalo,
+xeque-mate, afogamento, material insuficiente, repetição tripla, regra dos 50
+lances e desistência. O gerador de lances é validado por *perft* nas posições de
+referência. Empates por repetição e 50 lances são aplicados automaticamente (sem
+precisar reivindicar).
+
+**Go**: captura, proibição de suicídio, ko (superko posicional: nenhuma posição
+pode se repetir), passe, fim por dois passes, desistência, komi, handicap com os
+pontos tradicionais (brancas começam). Contagem por área (chinesa: pedras +
+território + komi, e 1 ponto por pedra de handicap para as brancas) e por
+território (japonesa: território + prisioneiros + komi). Pontos neutros (dame) não
+contam para ninguém. Na contagem, as pedras mortas são sugeridas automaticamente
+e você corrige com cliques.
+
 ## Como funciona
 
 ```
@@ -105,6 +147,7 @@ tabletop/
   fx.py                  partículas, textos saltando, tremida, easing
   chess_rules.py         regras completas de xadrez (sem dependências)
   go_rules.py            regras de Go, contagem e sugestão de pedras mortas
+  storage.py             área de transferência e posições salvas
   chess_scene.py         mesa de xadrez (modos Jogo/Livre, animações, placar)
   go_scene.py            mesa de Go (modos Jogo/Livre, contagem, placar)
 tests/                   testes das regras (perft do xadrez, capturas/ko/contagem do Go)

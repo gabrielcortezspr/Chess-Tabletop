@@ -9,6 +9,7 @@ from . import chess_rules as cr
 from .fx import ease_out_back
 from .pixelart import OUTLINE, draw_tiny, piece_sprites, silhouette
 from .scene_base import SceneBase
+from .storage import copy_text, load_positions, paste_text, save_position
 
 SQ = 18           # tamanho da casa em pixels da textura
 FR = 9            # largura da moldura
@@ -67,6 +68,7 @@ class ChessScene(SceneBase):
         self.tally = {"w": 0.0, "b": 0.0}
         self.counted = None
         self._static = {}
+        self.saved_index = -1
 
     # ------------------------------------------------------------ geometria
     def _disp(self, cell):
@@ -155,19 +157,123 @@ class ChessScene(SceneBase):
         self.emit("banner", "VALENDO!", (255, 214, 90))
         self.toast(f"Vez das {COLOR_PT[turn]}")
 
-    def reset(self):
+    def reset(self, standard=False):
         if self.mode == "livre":
             self.free = standard_free_layout()
             self.held = None
             self.toast("Peças na posição inicial")
         else:
-            self.game = cr.ChessGame()
+            custom = self.game.start.to_fen() != cr.Position().to_fen()
+            if custom and not standard:
+                self.game = cr.ChessGame(self.game.start)
+                self.emit("banner", "DE NOVO!", (255, 214, 90))
+                self.toast("Recomeçou da posição montada (Shift+R: posição padrão)")
+            else:
+                self.game = cr.ChessGame()
+                self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
             self.counted = None
             self.selected = None
             self.pending_promo = None
             self.anims.clear()
-            self.emit("banner", "NOVA PARTIDA", (255, 214, 90))
         self.emit("sheen")
+
+    def redo(self):
+        if self.mode == "livre":
+            return
+        self.selected = None
+        g = self.game
+        if not g.redo_stack:
+            self.toast("Nada para refazer")
+            return
+        m = g.redo_stack[-1]
+        if m not in g.legal_moves():
+            g.redo_stack.clear()
+            return
+        g.redo_stack.pop()
+        self._play(m, keep_redo=True)
+
+    # ------------------------------------------------------------ treino
+    def export_fen(self):
+        if self.mode == "livre":
+            return self.free_position().to_fen()
+        return self.game.pos.to_fen()
+
+    def load_text(self, text):
+        """Aceita FEN (posição) ou PGN (partida). Retorna True se carregou."""
+        text = text.strip()
+        first = text.split()[0] if text.split() else ""
+        if first.count("/") == 7 and "[" not in text:
+            try:
+                pos = cr.Position.from_fen(text)
+            except ValueError as e:
+                self.toast(f"FEN inválida: {e}")
+                self.emit("shake", 3)
+                return False
+            err = cr.validate_position(pos)
+            self._return_held()
+            if err:
+                # posição incompleta: abre no modo livre para terminar de montar
+                self.free = {(cr.file_of(i), cr.rank_of(i)): p for i, p in enumerate(pos.board) if p}
+                self.mode = "livre"
+                self.toast("Aberta no modo livre: " + err)
+            else:
+                self.game = cr.ChessGame(pos)
+                self.counted = None
+                self.mode = "jogo"
+                self.toast(f"Posição carregada: vez das {COLOR_PT[pos.turn]}")
+            self.selected = None
+            self.anims.clear()
+            self.emit("sheen")
+            return True
+        try:
+            game = cr.parse_pgn(text)
+        except ValueError as e:
+            self.toast(str(e))
+            self.emit("shake", 3)
+            return False
+        n = len(game.history)
+        game.rewind()
+        self.game = game
+        self.counted = None
+        self.mode = "jogo"
+        self.selected = None
+        self.anims.clear()
+        self.emit("sheen")
+        self.emit("banner", "PGN CARREGADO", (255, 214, 90))
+        self.toast(f"{n} lance(s): Y avança, Z volta")
+        return True
+
+    def training_key(self, key, mod):
+        if not mod & pygame.KMOD_CTRL:
+            return False
+        shift = bool(mod & pygame.KMOD_SHIFT)
+        if key == pygame.K_c:
+            if shift and self.mode == "jogo":
+                ok = copy_text(self.game.pgn())
+                self.toast("PGN copiado" if ok else "PGN salvo em posicoes/copiado.txt")
+            else:
+                ok = copy_text(self.export_fen())
+                self.toast("FEN copiada" if ok else "FEN salva em posicoes/copiado.txt")
+        elif key == pygame.K_v:
+            text = paste_text()
+            if not text:
+                self.toast("Área de transferência vazia (ou use posicoes/colar.txt)")
+            else:
+                self.load_text(text)
+        elif key == pygame.K_s:
+            total = save_position("xadrez", self.export_fen())
+            self.toast(f"Posição salva ({total} em posicoes/xadrez.txt)")
+        elif key == pygame.K_l:
+            items = load_positions("xadrez")
+            if not items:
+                self.toast("Nenhuma posição salva ainda (Ctrl+S salva)")
+            else:
+                self.saved_index = (self.saved_index + 1) % len(items)
+                if self.load_text(items[self.saved_index]):
+                    self.toast(f"Posição salva {self.saved_index + 1}/{len(items)}")
+        else:
+            return False
+        return True
 
     def undo(self):
         if self.mode == "livre":
@@ -257,14 +363,14 @@ class ChessScene(SceneBase):
         else:
             self.selected = None
 
-    def _play(self, move):
+    def _play(self, move, keep_redo=False):
         g = self.game
         mover = g.pos.turn
         k = len(g.captured_by(mover))
         cap_sq = move.to
         if move.en_passant:
             cap_sq = cr.sq(cr.file_of(move.to), cr.rank_of(move.frm))
-        captured = g.push(move)
+        captured = g.push(move, keep_redo=keep_redo)
         self.selected = None
         self.anims.clear()
 
@@ -314,6 +420,14 @@ class ChessScene(SceneBase):
             elif key == pygame.K_ESCAPE:
                 self.pending_promo = None
                 self.selected = None
+            return True
+        if self.training_key(key, mod):
+            return True
+        if key == pygame.K_r:
+            self.reset(standard=shift)
+            return True
+        if key == pygame.K_y:
+            self.redo()
             return True
         if key == pygame.K_ESCAPE:
             if self.held:
@@ -528,8 +642,8 @@ class ChessScene(SceneBase):
                 d["lines"].append((line, (170, 176, 200)))
             if self.pending_promo:
                 d["lines"].append(("PROMOÇÃO: 1 D  2 T  3 B  4 C", (255, 230, 120)))
-            d["hints"] = [("Clique", "mover"), ("G", "desistir"), ("Z", "desfazer"), ("R", "nova"),
-                          ("M", "livre")]
+            d["hints"] = [("Clique", "mover"), ("Z", "volta"), ("Y", "avança"), ("R", "recomeça"),
+                          ("G", "desistir"), ("M", "livre")]
         else:
             pos = self.free_position()
             d["scores"] = [("BRANCAS", pos.material("w"), (0, 147, 255)),
