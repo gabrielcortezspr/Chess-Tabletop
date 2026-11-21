@@ -1,5 +1,7 @@
 # Tabletop: Xadrez & Go
 
+[![tests](https://github.com/gabrielcortezspr/Chess-Tabletop/actions/workflows/tests.yml/badge.svg)](https://github.com/gabrielcortezspr/Chess-Tabletop/actions/workflows/tests.yml)
+
 Uma mesa de **xadrez** e **Go (goban)** em Python, em **pixel art 2D com efeitos de
 shader** no estilo de jogos de cartas como Balatro: o tabuleiro é uma "carta" plana
 que inclina em pseudo-3D, sobre um fundo de tinta girando, com tela de monitor CRT.
@@ -165,3 +167,7 @@ até chegar à casa do tabuleiro.
 pip install pytest
 python -m pytest
 ```
+
+## Licença
+
+[MIT](LICENSE)
